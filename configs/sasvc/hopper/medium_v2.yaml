@@ -24,3 +24,5 @@ num_updates_on_epoch: 1000
 project: "CORL"
 tau: 0.005
 train_seed: 10
+actor_std: null
+critic_std: null
