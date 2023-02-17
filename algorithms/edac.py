@@ -350,6 +350,7 @@ class EDAC:
         q_value_dist = self.critic(state, action)
         assert q_value_dist.shape[0] == self.critic.num_critics
         q_value_min = q_value_dist.min(0).values
+        #q_value_min = q_value_dist.mean(0) - q_value_dist.std(0)
         # needed for logging
         q_value_std = q_value_dist.std(0).mean().item()
         batch_entropy = -action_log_prob.mean().item()
@@ -413,6 +414,8 @@ class EDAC:
                 next_state, need_log_prob=True
             )
             q_next = self.target_critic(next_state, next_action).min(0).values
+            # q_nexts = self.target_critic(next_state, next_action)
+            # q_next = q_nexts.mean(0) - 2 * q_nexts.std(0)
             q_next = q_next - self.alpha * next_action_log_prob
 
             assert q_next.unsqueeze(-1).shape == done.shape == reward.shape

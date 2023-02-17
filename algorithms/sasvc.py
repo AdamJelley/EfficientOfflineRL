@@ -316,6 +316,7 @@ class SVGD:
         self.K = kernel
         self.optim = optimizer
         self.lmbda = lmbda
+        self.gamma = 0.0
         self.param_lengths = tuple(
             [
                 int(param.numel() / param.size(0))
@@ -328,7 +329,7 @@ class SVGD:
         self.optim.zero_grad()
         loss.backward()
 
-        score = -torch.cat(
+        score = -(1 / self.lmbda) * torch.cat(
             [
                 param.grad.view(param.shape[0], -1)
                 for param in self.optim.param_groups[0]["params"]
@@ -351,14 +352,21 @@ class SVGD:
         )
         K_params = self.K(params, params.detach())  # N * N
         grad_K = -torch.autograd.grad(K_params.sum(), params)[0]  # N * D
-        phi = (K_params.detach().matmul(score) + self.lmbda * grad_K) / params.size(
+        phi = (K_params.detach().matmul(score) + grad_K) / params.size(
             0
-        )  # N * D
+        )  # + torch.sqrt(
+        #     2 * K_params.detach() / (params.size(0) * self.optim.param_groups[0]["lr"])
+        # ).matmul(
+        #     torch.normal(mean=torch.zeros_like(grad_K), std=torch.ones_like(grad_K)),
+        # )
+
+        # phi = score + self.lmbda * grad_K / (K_params.sum(1, keepdim=True))
+        # N * D
         # phi = score + grad_K  # / params.size(0)  # N * D
 
         self.phi = phi
 
-        return loss, K_params.detach().matmul(score).mean().item(), grad_K.mean().item()
+        return loss
 
     def step(self):
         self.optim.zero_grad()
@@ -368,6 +376,7 @@ class SVGD:
         ):
             param.grad = -phi.reshape(param.shape)
         self.optim.step()
+        # self.gamma = min(self.gamma + (1 / (1000 * 1000)), 1.0)
 
 
 class SASVC:
@@ -396,6 +405,7 @@ class SASVC:
         self.tau = tau
         self.gamma = gamma
         self.eta = eta
+        self.noise_variance = 1 / tau
 
         # adaptive alpha setup
         self.target_entropy = -float(self.actor.action_dim)
@@ -417,7 +427,8 @@ class SASVC:
         action, action_log_prob = self.actor(state, need_log_prob=True)
         q_value_dist = self.critic(state, action)
         assert q_value_dist.shape[0] == self.critic.num_critics
-        q_value_min = q_value_dist.min(0).values
+        # q_value_min = q_value_dist.min(0).values
+        q_value_min = q_value_dist.mean(0) - 5 * q_value_dist.std(0)
         # needed for logging
         q_value_std = q_value_dist.std(0).mean().item()
         batch_entropy = -action_log_prob.mean().item()
@@ -440,7 +451,13 @@ class SASVC:
                 next_state, need_log_prob=True
             )
             q_next = self.target_critic(next_state, next_action).min(0).values
+            # q_nexts = self.target_critic(next_state, next_action)
+            # q_next = q_nexts.mean(0) - 5 * q_nexts.std(0)
             q_next = q_next - self.alpha * next_action_log_prob
+            # noise_variance = (q_nexts.std(0) ** 2).mean().detach()
+            # self.noise_variance = (
+            #     1 - self.tau
+            # ) * self.noise_variance + self.tau * noise_variance
 
             assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
             q_target = reward + self.gamma * (1 - done) * q_next.unsqueeze(-1)
@@ -471,7 +488,7 @@ class SASVC:
         self.actor_optimizer.step()
 
         # Critic update
-        (critic_loss, smoothed_score, repulsive_grad) = self.critic_optimizer.backward(
+        critic_loss = self.critic_optimizer.backward(
             loss_function=self._critic_loss,
             state=state,
             action=action,
@@ -499,8 +516,6 @@ class SASVC:
             "alpha": self.alpha.item(),
             "q_policy_std": q_policy_std,
             "q_random_std": q_random_std,
-            "smoothed_score": smoothed_score,
-            "repulsive_grad": repulsive_grad,
         }
         return update_info
 
@@ -511,7 +526,7 @@ class SASVC:
             "target_critic": self.target_critic.state_dict(),
             "log_alpha": self.log_alpha.item(),
             "actor_optim": self.actor_optimizer.state_dict(),
-            "critic_optim": self.critic_optimizer.state_dict(),
+            "critic_optim": self.critic_optimizer.optim.state_dict(),
             "alpha_optim": self.alpha_optimizer.state_dict(),
         }
         return state
