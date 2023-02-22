@@ -56,6 +56,8 @@ class TrainConfig:
     log_every: int = 100
     device: str = "cpu"
     lmbda: float = 1.0
+    actor_std: Optional[float] = None
+    critic_std: Optional[float] = None
 
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
@@ -278,16 +280,21 @@ class VectorizedCritic(nn.Module):
     ):
         super().__init__()
         self.critic = nn.Sequential(
+            # nn.LayerNorm(state_dim + action_dim, elementwise_affine=False),
             VectorizedLinear(state_dim + action_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, 1, num_critics),
+            # nn.LayerNorm(1, elementwise_affine=False)
         )
         # init as in the EDAC paper
-        for layer in self.critic[::2]:
+        for layer in self.critic[::3]:
             torch.nn.init.constant_(layer.bias, 0.1)
 
         torch.nn.init.uniform_(self.critic[-1].weight, -3e-3, 3e-3)
@@ -316,6 +323,7 @@ class SVGD:
         self.K = kernel
         self.optim = optimizer
         self.lmbda = lmbda
+        self.num_steps = 0
         self.param_lengths = tuple(
             [
                 int(param.numel() / param.size(0))
@@ -351,14 +359,13 @@ class SVGD:
         )
         K_params = self.K(params, params.detach())  # N * N
         grad_K = -torch.autograd.grad(K_params.sum(), params)[0]  # N * D
-        phi = (K_params.detach().matmul(score) + self.lmbda * grad_K) / params.size(
-            0
-        )  # N * D
+        phi = (self.lmbda * K_params.detach().matmul(score) + grad_K) / params.size(0)
+        # N * D
         # phi = score + grad_K  # / params.size(0)  # N * D
 
         self.phi = phi
 
-        return loss, K_params.detach().matmul(score).mean().item(), grad_K.mean().item()
+        return loss, self.lmbda
 
     def step(self):
         self.optim.zero_grad()
@@ -368,6 +375,8 @@ class SVGD:
         ):
             param.grad = -phi.reshape(param.shape)
         self.optim.step()
+        self.num_steps += 1
+        # self.gamma = math.tanh((self.num_steps / (1000 * 50)) ** 2)
 
 
 class SASVC:
@@ -381,6 +390,8 @@ class SASVC:
         tau: float = 0.005,
         eta: float = 1.0,
         alpha_learning_rate: float = 1e-4,
+        actor_std: Optional[float] = None,
+        critic_std: Optional[float] = None,
         device: str = "cpu",  # noqa
     ):
         self.device = device
@@ -396,6 +407,9 @@ class SASVC:
         self.tau = tau
         self.gamma = gamma
         self.eta = eta
+        self.noise_variance = 1 / tau
+        self.actor_std = actor_std
+        self.critic_std = critic_std
 
         # adaptive alpha setup
         self.target_entropy = -float(self.actor.action_dim)
@@ -417,15 +431,30 @@ class SASVC:
         action, action_log_prob = self.actor(state, need_log_prob=True)
         q_value_dist = self.critic(state, action)
         assert q_value_dist.shape[0] == self.critic.num_critics
-        q_value_min = q_value_dist.min(0).values
+        if self.actor_std is None:
+            q_value_min = q_value_dist.min(0).values
+        else:
+            q_value_min = q_value_dist.mean(0) - self.actor_std * q_value_dist.std(0)
         # needed for logging
+        q_value_dist_max = q_value_dist[:, 0].max().item()
+        q_value_dist_min = q_value_dist[:, 0].min().item()
+        q_value_dist_mean = q_value_dist[:, 0].mean().item()
+        q_value_dist_std = q_value_dist[:, 0].std().item()
         q_value_std = q_value_dist.std(0).mean().item()
         batch_entropy = -action_log_prob.mean().item()
 
         assert action_log_prob.shape == q_value_min.shape
         loss = (self.alpha * action_log_prob - q_value_min).mean()
 
-        return loss, batch_entropy, q_value_std
+        return (
+            loss,
+            batch_entropy,
+            q_value_std,
+            q_value_dist_max,
+            q_value_dist_min,
+            q_value_dist_mean,
+            q_value_dist_std,
+        )
 
     def _critic_loss(
         self,
@@ -439,7 +468,11 @@ class SASVC:
             next_action, next_action_log_prob = self.actor(
                 next_state, need_log_prob=True
             )
-            q_next = self.target_critic(next_state, next_action).min(0).values
+            if self.critic_std is None:
+                q_next = self.target_critic(next_state, next_action).min(0).values
+            else:
+                q_nexts = self.target_critic(next_state, next_action)
+                q_next = q_nexts.mean(0) - self.critic_std * q_nexts.std(0)
             q_next = q_next - self.alpha * next_action_log_prob
 
             assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
@@ -448,6 +481,12 @@ class SASVC:
         q_values = self.critic(state, action)
         # [ensemble_size, batch_size] - [1, batch_size]
         critic_loss = ((q_values - q_target.view(1, -1)) ** 2).mean(dim=1).sum(dim=0)
+        # with torch.no_grad():
+        #     self.noise_variance = (
+        #         ((self.target_critic(state, action) - q_target.view(1, -1)) ** 2)
+        #         .mean()
+        #         .item()
+        #     )
 
         return critic_loss
 
@@ -465,13 +504,21 @@ class SASVC:
         self.alpha = self.log_alpha.exp().detach()
 
         # Actor update
-        actor_loss, actor_batch_entropy, q_policy_std = self._actor_loss(state)
+        (
+            actor_loss,
+            actor_batch_entropy,
+            q_policy_std,
+            q_value_dist_max,
+            q_value_dist_min,
+            q_value_dist_mean,
+            q_value_dist_std,
+        ) = self._actor_loss(state)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
 
         # Critic update
-        (critic_loss, smoothed_score, repulsive_grad) = self.critic_optimizer.backward(
+        critic_loss, gamma = self.critic_optimizer.backward(
             loss_function=self._critic_loss,
             state=state,
             action=action,
@@ -499,8 +546,11 @@ class SASVC:
             "alpha": self.alpha.item(),
             "q_policy_std": q_policy_std,
             "q_random_std": q_random_std,
-            "smoothed_score": smoothed_score,
-            "repulsive_grad": repulsive_grad,
+            "gamma": gamma,
+            "q_value_dist_max": q_value_dist_max,
+            "q_value_dist_min": q_value_dist_min,
+            "q_value_dist_mean": q_value_dist_mean,
+            "q_value_dist_std": q_value_dist_std,
         }
         return update_info
 
@@ -618,6 +668,8 @@ def train(config: TrainConfig):
         tau=config.tau,
         eta=config.eta,
         alpha_learning_rate=config.alpha_learning_rate,
+        actor_std=config.actor_std,
+        critic_std=config.critic_std,
         device=config.device,
     )
     # saving config to the checkpoint

@@ -53,6 +53,8 @@ class TrainConfig:
     eval_seed: int = 42
     log_every: int = 100
     device: str = "cpu"
+    actor_std: Optional[float] = None
+    critic_std: Optional[float] = None
 
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
@@ -314,6 +316,8 @@ class EDAC:
         eta: float = 1.0,
         alpha_learning_rate: float = 1e-4,
         device: str = "cpu",  # noqa
+        actor_std: Optional[float] = None,
+        critic_std: Optional[float] = None,
     ):
         self.device = device
 
@@ -328,6 +332,9 @@ class EDAC:
         self.tau = tau
         self.gamma = gamma
         self.eta = eta
+
+        self.actor_std = actor_std
+        self.critic_std = critic_std
 
         # adaptive alpha setup
         self.target_entropy = -float(self.actor.action_dim)
@@ -349,15 +356,30 @@ class EDAC:
         action, action_log_prob = self.actor(state, need_log_prob=True)
         q_value_dist = self.critic(state, action)
         assert q_value_dist.shape[0] == self.critic.num_critics
-        q_value_min = q_value_dist.min(0).values
+        if self.actor_std is None:
+            q_value_min = q_value_dist.min(0).values
+        else:
+            q_value_min = q_value_dist.mean(0) - self.actor_std * q_value_dist.std(0)
         # needed for logging
+        q_value_dist_max = q_value_dist[:, 0].max().item()
+        q_value_dist_min = q_value_dist[:, 0].min().item()
+        q_value_dist_mean = q_value_dist[:, 0].mean().item()
+        q_value_dist_std = q_value_dist[:, 0].std().item()
         q_value_std = q_value_dist.std(0).mean().item()
         batch_entropy = -action_log_prob.mean().item()
 
         assert action_log_prob.shape == q_value_min.shape
         loss = (self.alpha * action_log_prob - q_value_min).mean()
 
-        return loss, batch_entropy, q_value_std
+        return (
+            loss,
+            batch_entropy,
+            q_value_std,
+            q_value_dist_max,
+            q_value_dist_min,
+            q_value_dist_mean,
+            q_value_dist_std,
+        )
 
     def _critic_diversity_loss(
         self, state: torch.Tensor, action: torch.Tensor
@@ -412,7 +434,11 @@ class EDAC:
             next_action, next_action_log_prob = self.actor(
                 next_state, need_log_prob=True
             )
-            q_next = self.target_critic(next_state, next_action).min(0).values
+            if self.critic_std is None:
+                q_next = self.target_critic(next_state, next_action).min(0).values
+            else:
+                q_nexts = self.target_critic(next_state, next_action)
+                q_next = q_nexts.mean(0) - self.critic_std * q_nexts.std(0)
             q_next = q_next - self.alpha * next_action_log_prob
 
             assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
@@ -441,7 +467,15 @@ class EDAC:
         self.alpha = self.log_alpha.exp().detach()
 
         # Actor update
-        actor_loss, actor_batch_entropy, q_policy_std = self._actor_loss(state)
+        (
+            actor_loss,
+            actor_batch_entropy,
+            q_policy_std,
+            q_value_dist_max,
+            q_value_dist_min,
+            q_value_dist_mean,
+            q_value_dist_std,
+        ) = self._actor_loss(state)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
@@ -470,6 +504,10 @@ class EDAC:
             "alpha": self.alpha.item(),
             "q_policy_std": q_policy_std,
             "q_random_std": q_random_std,
+            "q_value_dist_max": q_value_dist_max,
+            "q_value_dist_min": q_value_dist_min,
+            "q_value_dist_mean": q_value_dist_mean,
+            "q_value_dist_std": q_value_dist_std,
         }
         return update_info
 
@@ -498,22 +536,46 @@ class EDAC:
 
 @torch.no_grad()
 def eval_actor(
-    env: gym.Env, actor: Actor, device: str, n_episodes: int, seed: int
+    env: gym.Env,
+    actor: Actor,
+    critic: VectorizedCritic,
+    device: str,
+    n_episodes: int,
+    seed: int,
 ) -> np.ndarray:
     env.seed(seed)
     actor.eval()
     episode_rewards = []
+    episode_q_values = []
+    episode_q_stds = []
     for _ in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
+        action = actor.act(state, device)
+        q_values = critic(
+            torch.from_numpy(state)
+            .to(device, dtype=torch.float32)
+            .unsqueeze(0)
+            .repeat(256, 1),
+            torch.from_numpy(action)
+            .to(device, dtype=torch.float32)
+            .unsqueeze(0)
+            .repeat(256, 1),
+        )
         while not done:
             action = actor.act(state, device)
             state, reward, done, _ = env.step(action)
             episode_reward += reward
         episode_rewards.append(episode_reward)
+        episode_q_values.append(q_values.mean().detach().cpu())
+        episode_q_stds.append(q_values.std().detach().cpu())
 
     actor.train()
-    return np.array(episode_rewards)
+    return (
+        np.array(episode_rewards),
+        np.array(episode_q_values),
+        np.array(episode_q_stds),
+    )
 
 
 def return_reward_range(dataset, max_episode_steps):
@@ -585,6 +647,8 @@ def train(config: TrainConfig):
         eta=config.eta,
         alpha_learning_rate=config.alpha_learning_rate,
         device=config.device,
+        actor_std=config.actor_std,
+        critic_std=config.critic_std,
     )
     # saving config to the checkpoint
     if config.checkpoints_path is not None:
@@ -607,9 +671,10 @@ def train(config: TrainConfig):
 
         # evaluation
         if epoch % config.eval_every == 0 or epoch == config.num_epochs - 1:
-            eval_returns = eval_actor(
+            eval_returns, eval_q_values, eval_q_stds = eval_actor(
                 env=eval_env,
                 actor=actor,
+                critic=critic,
                 n_episodes=config.eval_episodes,
                 seed=config.eval_seed,
                 device=config.device,
@@ -617,6 +682,8 @@ def train(config: TrainConfig):
             eval_log = {
                 "eval/reward_mean": np.mean(eval_returns),
                 "eval/reward_std": np.std(eval_returns),
+                "eval/q_values": np.mean(eval_q_values),
+                "eval/q_stds": np.mean(eval_q_stds),
                 "epoch": epoch,
             }
             if hasattr(eval_env, "get_normalized_score"):
