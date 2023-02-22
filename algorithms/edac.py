@@ -612,7 +612,7 @@ def train(config: TrainConfig):
     state_dim = eval_env.observation_space.shape[0]
     action_dim = eval_env.action_space.shape[0]
 
-    d4rl_dataset = d4rl.qlearning_dataset(eval_env)
+    d4rl_dataset = eval_env.get_dataset()
 
     if config.normalize_reward:
         modify_reward(d4rl_dataset, config.env_name)
