@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 import math
 import os
+from pathlib import Path
 import random
 import uuid
 
@@ -18,6 +19,8 @@ from torch.distributions import Normal
 import torch.nn as nn
 from tqdm import trange
 import wandb
+
+from video_recorder import VideoRecorder
 
 
 @dataclass
@@ -40,7 +43,7 @@ class TrainConfig:
     buffer_size: int = 1_000_000
     env_name: str = "halfcheetah-medium-v2"
     batch_size: int = 256
-    num_epochs: int = 3000
+    num_epochs: int = 1500
     num_updates_on_epoch: int = 1000
     normalize_reward: bool = False
     # evaluation params
@@ -51,10 +54,12 @@ class TrainConfig:
     deterministic_torch: bool = False
     train_seed: int = 10
     eval_seed: int = 42
+    test_seed: int = 1337
     log_every: int = 100
     device: str = "cpu"
     actor_std: Optional[float] = None
     critic_std: Optional[float] = None
+    render: Optional[bool] = False
 
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
@@ -272,15 +277,18 @@ class VectorizedCritic(nn.Module):
         super().__init__()
         self.critic = nn.Sequential(
             VectorizedLinear(state_dim + action_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, 1, num_critics),
         )
         # init as in the EDAC paper
-        for layer in self.critic[::2]:
+        for layer in self.critic[::3]:
             torch.nn.init.constant_(layer.bias, 0.1)
 
         torch.nn.init.uniform_(self.critic[-1].weight, -3e-3, 3e-3)
@@ -542,13 +550,16 @@ def eval_actor(
     device: str,
     n_episodes: int,
     seed: int,
+    name: str,
+    render: bool,
 ) -> np.ndarray:
     env.seed(seed)
     actor.eval()
     episode_rewards = []
     episode_q_values = []
     episode_q_stds = []
-    for _ in range(n_episodes):
+    video = VideoRecorder() if render else None
+    for i in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
         action = actor.act(state, device)
@@ -566,10 +577,14 @@ def eval_actor(
             action = actor.act(state, device)
             state, reward, done, _ = env.step(action)
             episode_reward += reward
+            if video is not None and i < 5:
+                video.record(env)
         episode_rewards.append(episode_reward)
         episode_q_values.append(q_values.mean().detach().cpu())
         episode_q_stds.append(q_values.std().detach().cpu())
 
+    if video is not None:
+        video.save(name)
     actor.train()
     return (
         np.array(episode_rewards),
@@ -678,6 +693,8 @@ def train(config: TrainConfig):
                 n_episodes=config.eval_episodes,
                 seed=config.eval_seed,
                 device=config.device,
+                name=config.name,
+                render=False,
             )
             eval_log = {
                 "eval/reward_mean": np.mean(eval_returns),
@@ -698,6 +715,36 @@ def train(config: TrainConfig):
                     trainer.state_dict(),
                     os.path.join(config.checkpoints_path, f"{epoch}.pt"),
                 )
+
+    # testing
+    test_returns, test_q_values, test_q_stds = eval_actor(
+        env=eval_env,
+        actor=actor,
+        critic=critic,
+        n_episodes=100,
+        seed=config.test_seed,
+        device=config.device,
+        name=config.name,
+        render=config.render,
+    )
+    alg_name, env_name, data_name, version, id = config.name.split("-")
+    video_path = (
+        Path("./videos")
+        .joinpath(f"{env_name}-{data_name}/{alg_name}")
+        .joinpath(f"{config.name}.mp4")
+    )
+    test_log = {
+        "test/reward_mean": np.mean(test_returns),
+        "video": wandb.Video(
+            str(video_path), caption="Final agent behaviour", fps=20, format="mp4"
+        ),
+    }
+    if hasattr(eval_env, "get_normalized_score"):
+        normalized_score = eval_env.get_normalized_score(test_returns) * 100.0
+        test_log["test/normalized_score_mean"] = np.mean(normalized_score)
+        test_log["test/normalized_score_std"] = np.std(normalized_score)
+
+    wandb.log(test_log)
 
     wandb.finish()
 

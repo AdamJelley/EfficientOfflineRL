@@ -4,6 +4,7 @@ benchmark.py
 mlc_run.sh
 .ml-job-preset.yml
 wandb
+videos
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
