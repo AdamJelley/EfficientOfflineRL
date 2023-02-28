@@ -21,7 +21,7 @@ name: "DT"
 num_heads: 1
 num_layers: 3
 num_workers: 4
-project: "CORL"
+project: offline-RL-init
 residual_dropout: 0.1
 reward_scale: 1.0
 seq_len: 20

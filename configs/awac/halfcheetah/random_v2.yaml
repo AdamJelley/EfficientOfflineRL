@@ -12,7 +12,7 @@ hidden_dim: 256
 learning_rate: 0.0003
 n_test_episodes: 10
 num_train_ops: 1000000
-project: CORL
+project: offline-RL-init
 seed: 42
 tau: 0.005
 test_seed: 69
