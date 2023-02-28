@@ -481,6 +481,10 @@ class SASVC:
                 q_nexts = self.target_critic(next_state, next_action)
                 q_next = q_nexts.mean(0) - self.critic_std * q_nexts.std(0)
             q_next = q_next - self.alpha * next_action_log_prob
+            # noise_variance = (q_nexts.std(0) ** 2).mean().detach()
+            # self.noise_variance = (
+            #     1 - self.tau
+            # ) * self.noise_variance + self.tau * noise_variance
 
             assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
             q_target = reward + self.gamma * (1 - done) * q_next.unsqueeze(-1)
@@ -525,7 +529,7 @@ class SASVC:
         self.actor_optimizer.step()
 
         # Critic update
-        critic_loss, gamma = self.critic_optimizer.backward(
+        critic_loss, lmbda = self.critic_optimizer.backward(
             loss_function=self._critic_loss,
             state=state,
             action=action,
@@ -553,7 +557,7 @@ class SASVC:
             "alpha": self.alpha.item(),
             "q_policy_std": q_policy_std,
             "q_random_std": q_random_std,
-            "gamma": gamma,
+            "lmbda": lmbda,
             "q_value_dist_max": q_value_dist_max,
             "q_value_dist_min": q_value_dist_min,
             "q_value_dist_mean": q_value_dist_mean,
@@ -568,7 +572,7 @@ class SASVC:
             "target_critic": self.target_critic.state_dict(),
             "log_alpha": self.log_alpha.item(),
             "actor_optim": self.actor_optimizer.state_dict(),
-            "critic_optim": self.critic_optimizer.state_dict(),
+            "critic_optim": self.critic_optimizer.optim.state_dict(),
             "alpha_optim": self.alpha_optimizer.state_dict(),
         }
         return state
@@ -578,7 +582,7 @@ class SASVC:
         self.critic.load_state_dict(state_dict["critic"])
         self.target_critic.load_state_dict(state_dict["target_critic"])
         self.actor_optimizer.load_state_dict(state_dict["actor_optim"])
-        self.critic_optimizer.load_state_dict(state_dict["critic_optim"])
+        self.critic_optimizer.optim.load_state_dict(state_dict["critic_optim"])
         self.alpha_optimizer.load_state_dict(state_dict["alpha_optim"])
         self.log_alpha.data[0] = state_dict["log_alpha"]
         self.alpha = self.log_alpha.exp().detach()
