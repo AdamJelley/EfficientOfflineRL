@@ -43,7 +43,7 @@ class TrainConfig:
     buffer_size: int = 1_000_000
     env_name: str = "halfcheetah-medium-v2"
     batch_size: int = 256
-    num_epochs: int = 1500
+    num_epochs: int = 3000
     num_updates_on_epoch: int = 1000
     normalize_reward: bool = False
     # evaluation params
@@ -214,10 +214,13 @@ class Actor(nn.Module):
         super().__init__()
         self.trunk = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
         )
         # with separate layers works better than with Linear(hidden_dim, 2 * action_dim)
@@ -225,7 +228,7 @@ class Actor(nn.Module):
         self.log_sigma = nn.Linear(hidden_dim, action_dim)
 
         # init as in the EDAC paper
-        for layer in self.trunk[::2]:
+        for layer in self.trunk[::3]:
             torch.nn.init.constant_(layer.bias, 0.1)
 
         torch.nn.init.uniform_(self.mu.weight, -1e-3, 1e-3)
@@ -577,7 +580,7 @@ def eval_actor(
             action = actor.act(state, device)
             state, reward, done, _ = env.step(action)
             episode_reward += reward
-            if video is not None and i < 5:
+            if video is not None and i < 3:
                 video.record(env)
         episode_rewards.append(episode_reward)
         episode_q_values.append(q_values.mean().detach().cpu())
