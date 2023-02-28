@@ -36,7 +36,7 @@ class TrainConfig:
     max_traj_len: int = 1000  # Max trajectory length
     normalize: bool = True  # Normalize states
     # Wandb logging
-    project: str = "CORL"
+    project: str = "offline-RL-init"
     group: str = "BC-D4RL"
     name: str = "BC"
 
@@ -304,7 +304,7 @@ def train(config: TrainConfig):
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    dataset = d4rl.qlearning_dataset(env)
+    dataset = env.get_dataset()
 
     keep_best_trajectories(dataset, config.frac, config.discount)
 
@@ -390,10 +390,11 @@ def train(config: TrainConfig):
                 f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
             )
             print("---------------------------------------")
-            torch.save(
-                trainer.state_dict(),
-                os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
-            )
+            if config.checkpoints_path is not None:
+                torch.save(
+                    trainer.state_dict(),
+                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                )
             wandb.log(
                 {"d4rl_normalized_score": normalized_eval_score},
                 step=trainer.total_it,

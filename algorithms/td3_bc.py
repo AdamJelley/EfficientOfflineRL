@@ -44,8 +44,10 @@ class TrainConfig:
     alpha: float = 2.5  # Coefficient for Q function in actor loss
     normalize: bool = True  # Normalize states
     normalize_reward: bool = False  # Normalize reward
+    pretrain: Optional[str] = None  # BC or AC
+    pretrain_steps: int = 10000
     # Wandb logging
-    project: str = "CORL"
+    project: str = "offline-RL-init"
     group: str = "TD3_BC-D4RL"
     name: str = "TD3_BC"
 
@@ -68,6 +70,14 @@ def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.nda
 
 def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
     return (states - mean) / std
+
+
+def discount_cumsum(x, discount):
+    disc_cumsum = np.zeros_like(x)
+    disc_cumsum[-1] = x[-1]
+    for t in reversed(range(x.shape[0] - 1)):
+        disc_cumsum[t] = x[t] + discount * disc_cumsum[t + 1]
+    return disc_cumsum
 
 
 def wrap_env(
@@ -98,6 +108,7 @@ class ReplayBuffer:
         state_dim: int,
         action_dim: int,
         buffer_size: int,
+        discount: float,
         device: str = "cpu",
     ):
         self._buffer_size = buffer_size
@@ -111,10 +122,14 @@ class ReplayBuffer:
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
         self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._discount = discount
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
@@ -129,11 +144,42 @@ class ReplayBuffer:
             raise ValueError(
                 "Replay buffer is smaller than the dataset you are trying to load!"
             )
+
+        episode_rewards = []
+        returns_to_go = []
+
+        for i in range(n_transitions):
+            if data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1:
+                episode_rewards.append(data["rewards"][i])
+                episode_returns_to_go = discount_cumsum(
+                    np.array(episode_rewards), self._discount
+                )
+                returns_to_go.append(episode_returns_to_go)
+                episode_rewards = []
+            else:
+                episode_rewards.append(data["rewards"][i])
+        data["returns_to_go"] = np.array(
+            [
+                return_to_go
+                for episode_returns in returns_to_go
+                for return_to_go in episode_returns
+            ]
+        ).flatten()
+        # print(data["returns_to_go"])
+        # print(data["rewards"][990:1010])
+        # print(data["returns_to_go"][990:1010])
+        # print(data["terminals"][990:1010])
+
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
+        self._returns_to_go[:n_transitions] = self._to_tensor(
+            data["returns_to_go"][..., None]
+        )
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._dones[:n_transitions] = self._to_tensor(
+            (data["terminals"] + data["timeouts"])[..., None]
+        )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
@@ -144,9 +190,10 @@ class ReplayBuffer:
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
+        returns_to_go = self._returns_to_go[indices]
         next_states = self._next_states[indices]
         dones = self._dones[indices]
-        return [states, actions, rewards, next_states, dones]
+        return [states, actions, rewards, returns_to_go, next_states, dones]
 
     def add_transition(self):
         # Use this method to add new data into the replay buffer during fine-tuning.
@@ -228,8 +275,10 @@ class Actor(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(state_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, action_dim),
             nn.Tanh(),
@@ -252,8 +301,10 @@ class Critic(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(state_dim + action_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 1),
         )
@@ -306,7 +357,7 @@ class TD3_BC:  # noqa
         log_dict = {}
         self.total_it += 1
 
-        state, action, reward, next_state, done = batch
+        state, action, reward, return_to_go, next_state, done = batch
         not_done = 1 - done
 
         with torch.no_grad():
@@ -341,7 +392,6 @@ class TD3_BC:  # noqa
 
         # Delayed actor updates
         if self.total_it % self.policy_freq == 0:
-
             # Compute actor loss
             pi = self.actor(state)
             q = self.critic_1(state, pi)
@@ -358,6 +408,55 @@ class TD3_BC:  # noqa
             soft_update(self.critic_1_target, self.critic_1, self.tau)
             soft_update(self.critic_2_target, self.critic_2, self.tau)
             soft_update(self.actor_target, self.actor, self.tau)
+
+        return log_dict
+
+    def pretrain_BC(self, batch: TensorBatch) -> Dict[str, float]:
+        log_dict = {}
+        self.total_it += 1
+
+        state, action, reward, return_to_go, next_state, done = batch
+        # Compute actor loss
+        pi = self.actor(state)
+        actor_loss = F.mse_loss(pi, action)
+        log_dict["actor_loss"] = actor_loss.item()
+        # Optimize the actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        return log_dict
+
+    def pretrain_actorcritic(self, batch: TensorBatch) -> Dict[str, float]:
+        log_dict = {}
+        self.total_it += 1
+
+        state, action, reward, return_to_go, next_state, done = batch
+        # Compute actor loss
+        pi = self.actor(state)
+        actor_loss = F.mse_loss(pi, action)
+        log_dict["actor_loss"] = actor_loss.item()
+        # Optimize the actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        # Compute critic loss
+        q1 = self.critic_1(state, action)
+        q2 = self.critic_2(state, action)
+        critic_loss = F.mse_loss(q1, return_to_go) + F.mse_loss(q2, return_to_go)
+        log_dict["critic_loss"] = critic_loss.item()
+        # Optimize the critic
+        self.critic_1_optimizer.zero_grad()
+        self.critic_2_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_1_optimizer.step()
+        self.critic_2_optimizer.step()
+
+        # Update the frozen target models
+        soft_update(self.critic_1_target, self.critic_1, self.tau)
+        soft_update(self.critic_2_target, self.critic_2, self.tau)
+        soft_update(self.actor_target, self.actor, self.tau)
 
         return log_dict
 
@@ -395,7 +494,7 @@ def train(config: TrainConfig):
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    dataset = d4rl.qlearning_dataset(env)
+    dataset = env.get_dataset()
 
     if config.normalize_reward:
         modify_reward(dataset, config.env)
@@ -416,6 +515,7 @@ def train(config: TrainConfig):
         state_dim,
         action_dim,
         config.buffer_size,
+        config.discount,
         config.device,
     )
     replay_buffer.load_d4rl_dataset(dataset)
@@ -477,7 +577,22 @@ def train(config: TrainConfig):
     for t in range(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
-        log_dict = trainer.train(batch)
+        if config.pretrain is not None:
+            if t <= config.pretrain_steps:
+                if config.pretrain == "BC":
+                    log_dict = trainer.pretrain_BC(batch)
+                elif config.pretrain == "AC":
+                    log_dict = trainer.pretrain_actorcritic(batch)
+                else:
+                    raise ValueError(f"Pretrain type {config.pretrain} not recognised.")
+                # if t == 10000:
+                #     trainer.actor_target = copy.deepcopy(trainer.actor)
+                #     trainer.critic_1_target = copy.deepcopy(trainer.critic_1)
+                #     trainer.critic_2_target = copy.deepcopy(trainer.critic_2)
+            else:
+                log_dict = trainer.train(batch)
+        else:
+            log_dict = trainer.train(batch)
         wandb.log(log_dict, step=trainer.total_it)
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
@@ -498,10 +613,11 @@ def train(config: TrainConfig):
                 f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
             )
             print("---------------------------------------")
-            torch.save(
-                trainer.state_dict(),
-                os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
-            )
+            if config.checkpoints_path is not None:
+                torch.save(
+                    trainer.state_dict(),
+                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                )
             wandb.log(
                 {"d4rl_normalized_score": normalized_eval_score},
                 step=trainer.total_it,
