@@ -44,7 +44,7 @@ class TrainConfig:
     alpha: float = 2.5  # Coefficient for Q function in actor loss
     normalize: bool = True  # Normalize states
     normalize_reward: bool = False  # Normalize reward
-    pretrain: Optional[str] = None  # BC or AC
+    pretrain: Optional[str] = None  # BC or AC or C
     pretrain_steps: int = 10000
     # Wandb logging
     project: str = "offline-RL-init"
@@ -330,6 +330,7 @@ class TD3_BC:  # noqa
         noise_clip: float = 0.5,
         policy_freq: int = 2,
         alpha: float = 2.5,
+        pretrain_steps: int = 10000,
         device: str = "cpu",
     ):
         self.actor = actor
@@ -351,6 +352,7 @@ class TD3_BC:  # noqa
         self.alpha = alpha
 
         self.total_it = 0
+        self.pretrain_steps = pretrain_steps
         self.device = device
 
     def train(self, batch: TensorBatch) -> Dict[str, float]:
@@ -460,6 +462,31 @@ class TD3_BC:  # noqa
 
         return log_dict
 
+    def pretrain_critic(self, batch: TensorBatch) -> Dict[str, float]:
+        log_dict = {}
+        self.total_it += 1
+
+        state, action, reward, return_to_go, next_state, done = batch
+
+        # Compute critic loss
+        q1 = self.critic_1(state, action)
+        q2 = self.critic_2(state, action)
+        critic_loss = F.mse_loss(q1, return_to_go) + F.mse_loss(q2, return_to_go)
+        log_dict["critic_loss"] = critic_loss.item()
+        # Optimize the critic
+        self.critic_1_optimizer.zero_grad()
+        self.critic_2_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_1_optimizer.step()
+        self.critic_2_optimizer.step()
+
+        # Update the frozen target models
+        soft_update(self.critic_1_target, self.critic_1, self.tau)
+        soft_update(self.critic_2_target, self.critic_2, self.tau)
+        soft_update(self.actor_target, self.actor, self.tau)
+
+        return log_dict
+
     def state_dict(self) -> Dict[str, Any]:
         return {
             "critic_1": self.critic_1.state_dict(),
@@ -507,6 +534,13 @@ def train(config: TrainConfig):
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
     )
+
+    if "next_observations" not in dataset.keys():
+        dataset["next_observations"] = np.roll(
+            dataset["observations"], shift=-1, axis=0
+        )  # Terminals/timeouts block next observations
+        print("Loaded next state observations from current state observations.")
+
     dataset["next_observations"] = normalize_states(
         dataset["next_observations"], state_mean, state_std
     )
@@ -557,6 +591,7 @@ def train(config: TrainConfig):
         "policy_freq": config.policy_freq,
         # TD3 + BC
         "alpha": config.alpha,
+        "pretrain_steps": config.pretrain_steps,
     }
 
     print("---------------------------------------")
@@ -583,6 +618,8 @@ def train(config: TrainConfig):
                     log_dict = trainer.pretrain_BC(batch)
                 elif config.pretrain == "AC":
                     log_dict = trainer.pretrain_actorcritic(batch)
+                elif config.pretrain == "C":
+                    log_dict = trainer.pretrain_critic(batch)
                 else:
                     raise ValueError(f"Pretrain type {config.pretrain} not recognised.")
                 # if t == 10000:
