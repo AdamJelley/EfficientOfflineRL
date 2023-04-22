@@ -46,6 +46,8 @@ class TrainConfig:
     normalize_reward: bool = False  # Normalize reward
     pretrain: Optional[str] = None  # BC or AC or C
     pretrain_steps: int = 10000
+    actor_LN: bool = True
+    critic_LN: bool = True
     # Wandb logging
     project: str = "offline-RL-init"
     group: str = "TD3_BC-D4RL"
@@ -237,7 +239,15 @@ def eval_actor(
         episode_reward = 0.0
         while not done:
             action = actor.act(state, device)
-            state, reward, done, _ = env.step(action)
+            try:
+                state, reward, done, _ = env.step(action)
+            except Exception as e:
+                print(e)
+                print(
+                    "Error with mujoco! Evaluation episode terminated and return set to zero."
+                )
+                episode_reward = 0
+                break
             episode_reward += reward
         episode_rewards.append(episode_reward)
 
@@ -270,15 +280,17 @@ def modify_reward(dataset, env_name, max_episode_steps=1000):
 
 
 class Actor(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, max_action: float):
+    def __init__(
+        self, state_dim: int, action_dim: int, max_action: float, actor_LN: bool = True
+    ):
         super(Actor, self).__init__()
 
         self.net = nn.Sequential(
             nn.Linear(state_dim, 256),
-            nn.LayerNorm(256, elementwise_affine=False),
+            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, 256),
-            nn.LayerNorm(256, elementwise_affine=False),
+            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, action_dim),
             nn.Tanh(),
@@ -296,11 +308,30 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int):
+    def __init__(self, state_dim: int, action_dim: int, critic_LN: bool = True):
         super(Critic, self).__init__()
 
         self.net = nn.Sequential(
             nn.Linear(state_dim + action_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if critic_LN else nn.Identity(),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if critic_LN else nn.Identity(),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+        )
+
+    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        sa = torch.cat([state, action], 1)
+        return self.net(sa)
+
+
+class ValueNet(nn.Module):
+    def __init__(self, state_dim: int):
+        super(ValueNet, self).__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, 256),
             nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 256),
@@ -309,9 +340,8 @@ class Critic(nn.Module):
             nn.Linear(256, 1),
         )
 
-    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        sa = torch.cat([state, action], 1)
-        return self.net(sa)
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.net(state)
 
 
 class TD3_BC:  # noqa
@@ -324,6 +354,8 @@ class TD3_BC:  # noqa
         critic_1_optimizer: torch.optim.Optimizer,
         critic_2: nn.Module,
         critic_2_optimizer: torch.optim.Optimizer,
+        value_net: nn.Module,
+        value_net_optimizer=torch.optim.Optimizer,
         discount: float = 0.99,
         tau: float = 0.005,
         policy_noise: float = 0.2,
@@ -342,6 +374,9 @@ class TD3_BC:  # noqa
         self.critic_2 = critic_2
         self.critic_2_target = copy.deepcopy(critic_2)
         self.critic_2_optimizer = critic_2_optimizer
+
+        self.value_net = value_net
+        self.value_net_optimizer = value_net_optimizer
 
         self.max_action = max_action
         self.discount = discount
@@ -378,13 +413,76 @@ class TD3_BC:  # noqa
             target_q = torch.min(target_q1, target_q2)
             target_q = reward + not_done * self.discount * target_q
 
+            # Compute target V
+            # next_V = self.value_net(next_state)
+            # target_V = reward + self.discount * next_V
+
         # Get current Q estimates
         current_q1 = self.critic_1(state, action)
         current_q2 = self.critic_2(state, action)
+        # V = self.value_net(state)
+
+        # Compute regularisation
+        # pi = self.actor(state)
+        # q1_policy_values = self.critic_1(state, pi)
+        # q2_policy_values = self.critic_2(state, pi)
+        # random_actions = action.new_empty(
+        #     (10 * action.shape[0], action.shape[1]), requires_grad=False
+        # ).uniform_(-1, 1)
+        # repeated_state = state.repeat(10, 1)
+        # q1_policy_values = self.critic_1(repeated_state, random_actions)
+        # q2_policy_values = self.critic_2(repeated_state, random_actions)
+
+        # support_regulariser = (
+        #     torch.maximum(q1_policy_values, torch.zeros_like(q1_policy_values)).reshape(
+        #         10, -1, 1
+        #     )
+        #     - current_q1.unsqueeze(0)
+        # ).mean() + (
+        #     torch.maximum(q2_policy_values, torch.zeros_like(q2_policy_values)).reshape(
+        #         10, -1, 1
+        #     )
+        #     - current_q2.unsqueeze(0)
+        # ).mean()
+        # support_regulariser = (
+        #     torch.logsumexp(
+        #         torch.maximum(
+        #             q1_policy_values, torch.zeros_like(q1_policy_values)
+        #         ).reshape(10, -1, 1),
+        #         dim=0,
+        #     )
+        #     - current_q1
+        # ).mean() + (
+        #     torch.logsumexp(
+        #         torch.maximum(
+        #             q2_policy_values, torch.zeros_like(q2_policy_values)
+        #         ).reshape(10, -1, 1),
+        #         dim=0,
+        #     )
+        #     - current_q2
+        # ).mean()
+
+        # if hasattr(self, "pretrained_critic_1"):
+        #     pretrain_q1 = self.pretrained_critic_1(state, action)
+        #     pretrain_q2 = self.pretrained_critic_2(state, action)
+        #     KL_regulariser = F.mse_loss(current_q1, pretrain_q1) + F.mse_loss(
+        #         current_q2, pretrain_q2
+        #     )
+        #     log_dict["KL_regulariser"] = KL_regulariser.item()
+        # else:
+        #     KL_regulariser = 0
 
         # Compute critic loss
         critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
         log_dict["critic_loss"] = critic_loss.item()
+        # critic_loss = critic_loss / critic_loss.detach() + KL_regulariser / (
+        #     KL_regulariser.detach() + 1e-6
+        # )
+        # critic_loss = (
+        #     critic_loss / critic_loss.detach()
+        #     + support_regulariser / support_regulariser.detach()
+        # )
+
         # Optimize the critic
         self.critic_1_optimizer.zero_grad()
         self.critic_2_optimizer.zero_grad()
@@ -392,11 +490,17 @@ class TD3_BC:  # noqa
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
 
+        # value_loss = F.mse_loss(V, target_V)
+        # self.value_net_optimizer.zero_grad()
+        # value_loss.backward()
+        # self.value_net_optimizer.step()
+
         # Delayed actor updates
         if self.total_it % self.policy_freq == 0:
             # Compute actor loss
             pi = self.actor(state)
             q = self.critic_1(state, pi)
+            # V = self.value_net(state)
             lmbda = self.alpha / q.abs().mean().detach()
 
             actor_loss = -lmbda * q.mean() + F.mse_loss(pi, action)
@@ -432,10 +536,17 @@ class TD3_BC:  # noqa
     def pretrain_actorcritic(self, batch: TensorBatch) -> Dict[str, float]:
         log_dict = {}
         self.total_it += 1
+        # beta = self.total_it / self.pretrain_steps
+        # log_dict["beta"] = beta
 
         state, action, reward, return_to_go, next_state, done = batch
         # Compute actor loss
         pi = self.actor(state)
+
+        # lmbda = self.alpha / (return_to_go).abs().mean().detach()
+
+        # actor_loss = -lmbda * return_to_go.mean() + F.mse_loss(pi, action)
+
         actor_loss = F.mse_loss(pi, action)
         log_dict["actor_loss"] = actor_loss.item()
         # Optimize the actor
@@ -446,14 +557,90 @@ class TD3_BC:  # noqa
         # Compute critic loss
         q1 = self.critic_1(state, action)
         q2 = self.critic_2(state, action)
+
+        # Compute regularisation
+        # pi = self.actor(state)
+        # q1_policy_values = self.critic_1(state, pi)
+        # q2_policy_values = self.critic_2(state, pi)
+
+        random_actions = action.new_empty(
+            (10 * action.shape[0], action.shape[1]), requires_grad=False
+        ).uniform_(-1, 1)
+        repeated_state = state.repeat(10, 1)
+        q1_policy_values = self.critic_1(repeated_state, random_actions)
+        q2_policy_values = self.critic_2(repeated_state, random_actions)
+
+        # support_regulariser = (
+        #     torch.maximum(q1_policy_values, torch.zeros_like(q1_policy_values)).reshape(
+        #         10, -1, 1
+        #     )
+        #     - q1.unsqueeze(0)
+        # ).mean() + (
+        #     torch.maximum(q2_policy_values, torch.zeros_like(q2_policy_values)).reshape(
+        #         10, -1, 1
+        #     )
+        #     - q2.unsqueeze(0)
+        # ).mean()
+        # support_regulariser = (
+        #     torch.logsumexp(
+        #         torch.maximum(
+        #             q1_policy_values, torch.zeros_like(q1_policy_values)
+        #         ).reshape(10, -1, 1),
+        #         dim=0,
+        #     )
+        #     - q1
+        # ).mean() + (
+        #     torch.logsumexp(
+        #         torch.maximum(
+        #             q2_policy_values, torch.zeros_like(q2_policy_values)
+        #         ).reshape(10, -1, 1),
+        #         dim=0,
+        #     )
+        #     - q2
+        # ).mean()
+        # log_dict["support_regulariser"] = support_regulariser.item()
+
+        # with torch.no_grad():
+        #     # Select action according to actor and add clipped noise
+        #     noise = (torch.randn_like(action) * self.policy_noise).clamp(
+        #         -self.noise_clip, self.noise_clip
+        #     )
+
+        #     next_action = (self.actor_target(next_state) + noise).clamp(
+        #         -self.max_action, self.max_action
+        #     )
+
+        #     #     # Compute the target Q value
+        #     target_q1 = self.critic_1_target(next_state, next_action)
+        #     target_q2 = self.critic_2_target(next_state, next_action)
+        #     target_q = torch.min(target_q1, target_q2)
+        #     target_q = reward + (1 - done) * self.discount * target_q
+
+        # critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)  # + (
+        # # F.mse_loss(q1, return_to_go) + F.mse_loss(q2, return_to_go)
+        # # )
+
         critic_loss = F.mse_loss(q1, return_to_go) + F.mse_loss(q2, return_to_go)
+        # critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
         log_dict["critic_loss"] = critic_loss.item()
+
+        # critic_loss = (
+        #     critic_loss / critic_loss.detach()
+        #     + support_regulariser / support_regulariser.detach()
+        # )
+
         # Optimize the critic
         self.critic_1_optimizer.zero_grad()
         self.critic_2_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
+
+        # V = self.value_net(state)
+        # value_loss = F.mse_loss(V, return_to_go)
+        # self.value_net_optimizer.zero_grad()
+        # value_loss.backward()
+        # self.value_net_optimizer.step()
 
         # Update the frozen target models
         soft_update(self.critic_1_target, self.critic_1, self.tau)
@@ -484,6 +671,12 @@ class TD3_BC:  # noqa
         soft_update(self.critic_1_target, self.critic_1, self.tau)
         soft_update(self.critic_2_target, self.critic_2, self.tau)
         soft_update(self.actor_target, self.actor, self.tau)
+
+        # V = self.value_net(state)
+        # value_loss = F.mse_loss(V, return_to_go)
+        # self.value_net_optimizer.zero_grad()
+        # value_loss.backward()
+        # self.value_net_optimizer.step()
 
         return log_dict
 
@@ -566,13 +759,16 @@ def train(config: TrainConfig):
     seed = config.seed
     set_seed(seed, env)
 
-    actor = Actor(state_dim, action_dim, max_action).to(config.device)
+    actor = Actor(state_dim, action_dim, max_action, config.actor_LN).to(config.device)
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=3e-4)
 
-    critic_1 = Critic(state_dim, action_dim).to(config.device)
+    critic_1 = Critic(state_dim, action_dim, config.critic_LN).to(config.device)
     critic_1_optimizer = torch.optim.Adam(critic_1.parameters(), lr=3e-4)
-    critic_2 = Critic(state_dim, action_dim).to(config.device)
+    critic_2 = Critic(state_dim, action_dim, config.critic_LN).to(config.device)
     critic_2_optimizer = torch.optim.Adam(critic_2.parameters(), lr=3e-4)
+
+    value_net = ValueNet(state_dim).to(config.device)
+    value_net_optimizer = torch.optim.Adam(value_net.parameters(), lr=3e-4)
 
     kwargs = {
         "max_action": max_action,
@@ -582,6 +778,8 @@ def train(config: TrainConfig):
         "critic_1_optimizer": critic_1_optimizer,
         "critic_2": critic_2,
         "critic_2_optimizer": critic_2_optimizer,
+        "value_net": value_net,
+        "value_net_optimizer": value_net_optimizer,
         "discount": config.discount,
         "tau": config.tau,
         "device": config.device,
@@ -613,7 +811,7 @@ def train(config: TrainConfig):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
         if config.pretrain is not None:
-            if t <= config.pretrain_steps:
+            if t < config.pretrain_steps:
                 if config.pretrain == "BC":
                     log_dict = trainer.pretrain_BC(batch)
                 elif config.pretrain == "AC":
@@ -627,6 +825,10 @@ def train(config: TrainConfig):
                 #     trainer.critic_1_target = copy.deepcopy(trainer.critic_1)
                 #     trainer.critic_2_target = copy.deepcopy(trainer.critic_2)
             else:
+                if t == config.pretrain_steps:
+                    with torch.no_grad():
+                        trainer.pretrained_critic_1 = copy.deepcopy(trainer.critic_1)
+                        trainer.pretrained_critic_2 = copy.deepcopy(trainer.critic_2)
                 log_dict = trainer.train(batch)
         else:
             log_dict = trainer.train(batch)
@@ -659,6 +861,27 @@ def train(config: TrainConfig):
                 {"d4rl_normalized_score": normalized_eval_score},
                 step=trainer.total_it,
             )
+
+    # testing
+    test_returns = eval_actor(
+        env=env,
+        actor=actor,
+        device=config.device,
+        n_episodes=100,
+        seed=config.seed,
+    )
+    test_log = {
+        "test/reward_mean": np.mean(test_returns),
+        "test/reward_std": np.std(test_returns),
+    }
+    if hasattr(env, "get_normalized_score"):
+        normalized_score = env.get_normalized_score(test_returns) * 100.0
+        test_log["test/normalized_score_mean"] = np.mean(normalized_score)
+        test_log["test/normalized_score_std"] = np.std(normalized_score)
+
+    wandb.log(test_log)
+
+    wandb.finish()
 
 
 if __name__ == "__main__":

@@ -4,10 +4,10 @@ buffer_size: 10000000
 checkpoints_path: null
 device: cuda
 discount: 0.99
-env: antmaze-large-play-v0
+env: antmaze-umaze-v2
 eval_freq: 5000
 expl_noise: 0.1
-group: td3-bc-antmaze-large-play-v0-multiseed-v0
+group: td3-bc-antmaze-umaze-v2-multiseed-v0
 load_model: ''
 max_timesteps: 1000000
 n_episodes: 100
