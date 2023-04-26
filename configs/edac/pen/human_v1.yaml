@@ -7,7 +7,7 @@ critic_learning_rate: 0.0003
 deterministic_torch: false
 device: cuda
 env_name: "pen-human-v1"
-eta: 10.0
+eta: 1000.0
 eval_episodes: 10
 eval_every: 5
 eval_seed: 42
