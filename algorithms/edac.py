@@ -35,7 +35,7 @@ class TrainConfig:
     gamma: float = 0.99
     tau: float = 5e-3
     eta: float = 1.0
-    pretrain_eta: float = 1.0
+    # pretrain_eta: float = 1.0
     actor_learning_rate: float = 3e-4
     critic_learning_rate: float = 3e-4
     alpha_learning_rate: float = 3e-4
@@ -66,6 +66,7 @@ class TrainConfig:
     cql_regulariser: float = -1.0
     cql_n_actions: int = 10
     kl_regulariser: float = -1.0
+    actor_kl_regulariser: float = -1.0
     actor_LN: bool = True
     critic_LN: bool = True
     render: bool = False
@@ -396,6 +397,7 @@ class Actor(nn.Module):
         state: torch.Tensor,
         deterministic: bool = False,
         need_log_prob: bool = False,
+        need_policy_dist: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden = self.trunk(state)
         mu, log_sigma = self.mu(hidden), self.log_sigma(hidden)
@@ -415,6 +417,9 @@ class Actor(nn.Module):
             # change of variables formula (SAC paper, appendix C, eq 21)
             log_prob = policy_dist.log_prob(action).sum(axis=-1)
             log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(axis=-1)
+
+        if need_policy_dist:
+            return tanh_action * self.max_action, log_prob, policy_dist
 
         return tanh_action * self.max_action, log_prob
 
@@ -502,7 +507,7 @@ class EDAC:
         gamma: float = 0.99,
         tau: float = 0.005,
         eta: float = 1.0,
-        pretrain_eta: float = 1.0,
+        # pretrain_eta: float = 1.0,
         alpha_learning_rate: float = 1e-4,
         bc_regulariser: float = -1.0,
         td_component: float = -1.0,
@@ -510,6 +515,7 @@ class EDAC:
         cql_regulariser: float = -1.0,
         cql_n_actions: int = 10,
         kl_regulariser: float = -1.0,
+        actor_kl_regulariser: float = -1.0,
         device: str = "cpu",  # noqa
     ):
         self.device = device
@@ -525,7 +531,7 @@ class EDAC:
         self.tau = tau
         self.gamma = gamma
         self.eta = eta
-        self.pretrain_eta = pretrain_eta
+        # self.pretrain_eta = eta
 
         self.bc_regulariser = bc_regulariser
         if td_component > 0.0:
@@ -537,6 +543,7 @@ class EDAC:
         self.cql_regulariser = cql_regulariser
         self.cql_n_actions = cql_n_actions
         self.kl_regulariser = kl_regulariser
+        self.actor_kl_regulariser = actor_kl_regulariser
 
         # adaptive alpha setup
         self.target_entropy = -float(self.actor.action_dim)
@@ -560,7 +567,9 @@ class EDAC:
         action: torch.Tensor,
         return_to_go: torch.Tensor,
     ) -> Tuple[torch.Tensor, float, float]:
-        pi, log_pi = self.actor(state, need_log_prob=True)
+        pi, log_pi, policy_dist = self.actor(
+            state, need_log_prob=True, need_policy_dist=True
+        )
 
         log_prob_action = self.actor.log_prob(state, action)
 
@@ -573,10 +582,38 @@ class EDAC:
 
         assert log_pi.shape == q_value_min.shape
         if self.bc_regulariser > 0.0:
-            bc_loss = (self.alpha * log_pi - log_prob_action).mean()
-            loss = (self.bc_regulariser * bc_loss / bc_loss) - (q_value_min.mean() / q_value_min.mean().detach())
+            # bc_loss = (self.alpha * log_pi - log_prob_action).mean()
+            # loss = (self.bc_regulariser * bc_loss / bc_loss) - (
+            #     q_value_min.mean() / q_value_min.mean().detach()
+            # )
+            # loss = (self.alpha * log_pi - q_value_min).mean()
+            # loss = loss / loss.detach() - self.bc_regulariser * log_prob_action.mean()
+            bc_loss = F.mse_loss(pi, action)
+            loss = (self.alpha * log_pi - q_value_min).mean()
+            loss = (
+                loss / loss.detach() + self.bc_regulariser * bc_loss / bc_loss.detach()
+            )
         else:
             loss = (self.alpha * log_pi - q_value_min).mean()
+
+        if self.actor_kl_regulariser > 0.0:
+            pretrained_action, _ = self.pretrained_actor(state, deterministic=True)
+
+            KL_regulariser = F.mse_loss(pi, pretrained_action.detach())
+            loss = loss / loss.detach() + self.actor_kl_regulariser * KL_regulariser / (
+                KL_regulariser.detach() + 1e-6
+            )
+            # (
+            #     pretrained_action,
+            #     pretrained_log_prob,
+            #     pretrained_policy_dist,
+            # ) = self.pretrained_actor(state, need_policy_dist=True)
+            # KL_regulariser = torch.distributions.kl.kl_divergence(
+            #     policy_dist, pretrained_policy_dist
+            # ).mean()
+            # loss = loss / loss.detach() + self.actor_kl_regulariser * KL_regulariser / (
+            #     KL_regulariser.detach() + 1e-6
+            # )
 
         return loss, batch_entropy, q_value_std
 
@@ -720,7 +757,7 @@ class EDAC:
         # [ensemble_size, batch_size] - [1, batch_size]
         MC_critic_loss = ((q_values - return_to_go.view(1, -1)) ** 2).mean()
         diversity_loss = self._critic_diversity_loss(state, action)
-        critic_loss = MC_critic_loss + self.pretrain_eta * diversity_loss
+        critic_loss = MC_critic_loss + self.eta * diversity_loss
         log_dict["MC_critic_loss"] = MC_critic_loss.item()
         log_dict["diversity_loss"] = diversity_loss.item()
 
@@ -742,7 +779,7 @@ class EDAC:
             critic_loss = (
                 ((1 - self.td_component) * MC_critic_loss / MC_critic_loss.detach())
                 + self.td_component * TD_critic_loss / TD_critic_loss.detach()
-                + self.pretrain_eta * diversity_loss
+                + self.eta * diversity_loss
             )
             log_dict["TD_critic_loss"] = TD_critic_loss.item()
 
@@ -801,7 +838,7 @@ class EDAC:
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
         self.alpha_optimizer.step()
-        self.alpha = self.log_alpha.exp().detach()
+        self.alpha = torch.clip(self.log_alpha, -10, 10).exp().detach()
 
         # Actor update
         actor_loss, actor_batch_entropy, q_policy_std = self._actor_loss(
@@ -981,7 +1018,7 @@ def train(config: TrainConfig):
         gamma=config.gamma,
         tau=config.tau,
         eta=config.eta,
-        pretrain_eta=config.pretrain_eta,
+        # pretrain_eta=config.pretrain_eta,
         alpha_learning_rate=config.alpha_learning_rate,
         bc_regulariser=config.bc_regulariser,
         td_component=config.td_component,
@@ -989,6 +1026,7 @@ def train(config: TrainConfig):
         cql_regulariser=config.cql_regulariser,
         cql_n_actions=config.cql_n_actions,
         kl_regulariser=config.kl_regulariser,
+        actor_kl_regulariser=config.actor_kl_regulariser,
         device=config.device,
     )
     # saving config to the checkpoint
