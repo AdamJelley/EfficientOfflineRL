@@ -1,4 +1,4 @@
-alpha: 2.5
+alpha: 1.0
 batch_size: 256
 buffer_size: 10000000
 checkpoints_path: null
