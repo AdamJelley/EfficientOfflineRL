@@ -17,6 +17,7 @@ import pyrallis
 import torch
 from torch.distributions import Normal
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import trange
 import wandb
 
@@ -26,7 +27,7 @@ from video_recorder import VideoRecorder
 @dataclass
 class TrainConfig:
     # wandb params
-    project: str = "CORL"
+    project: str = "offline-RL-init"
     group: str = "EDAC-D4RL"
     name: str = "EDAC"
     # model params
@@ -35,6 +36,7 @@ class TrainConfig:
     gamma: float = 0.99
     tau: float = 5e-3
     eta: float = 1.0
+    # pretrain_eta: float = 1.0
     actor_learning_rate: float = 3e-4
     critic_learning_rate: float = 3e-4
     alpha_learning_rate: float = 3e-4
@@ -57,9 +59,20 @@ class TrainConfig:
     test_seed: int = 1337
     log_every: int = 100
     device: str = "cpu"
-    actor_std: Optional[float] = None
-    critic_std: Optional[float] = None
-    render: Optional[bool] = False
+    pretrain: Optional[str] = None  # BC or softAC or softC
+    pretrain_epochs: int = 10
+    percentage_pretrain_BC: float = 0.5
+    td_component: float = -1.0
+    bc_regulariser: float = -1.0
+    soft_bc_regulariser: float = -1.0
+    pretrain_cql_regulariser: float = -1.0
+    cql_regulariser: float = -1.0
+    cql_n_actions: int = 10
+    kl_regulariser: float = -1.0
+    actor_kl_regulariser: float = -1.0
+    actor_LN: bool = True
+    critic_LN: bool = True
+    render: bool = False
 
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
@@ -83,6 +96,7 @@ def wandb_init(config: dict) -> None:
         group=config["group"],
         name=config["name"],
     )
+    wandb.run.log_code(".")
     wandb.run.save()
 
 
@@ -97,6 +111,32 @@ def set_seed(
     random.seed(seed)
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(deterministic_torch)
+
+
+def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
+    mean = states.mean(0)
+    std = states.std(0) + eps
+    return mean, std
+
+
+def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
+    return (states - mean) / std
+
+
+def discount_cumsum(x, discount, include_first=True):
+    if isinstance(x, torch.Tensor):
+        disc_cumsum = torch.zeros_like(x).detach()
+    else:
+        disc_cumsum = np.zeros_like(x)
+    if include_first:
+        disc_cumsum[-1] = x[-1]
+        for t in reversed(range(x.shape[0] - 1)):
+            disc_cumsum[t] = x[t] + discount * disc_cumsum[t + 1]
+    else:
+        disc_cumsum[-1] = 0
+        for t in reversed(range(x.shape[0] - 1)):
+            disc_cumsum[t] = discount * x[t + 1] + discount * disc_cumsum[t + 1]
+    return disc_cumsum
 
 
 def wrap_env(
@@ -123,8 +163,11 @@ class ReplayBuffer:
         state_dim: int,
         action_dim: int,
         buffer_size: int,
+        batch_size: int,
+        discount: float,
         device: str = "cpu",
     ):
+        self._action_dim = action_dim
         self._buffer_size = buffer_size
         self._pointer = 0
         self._size = 0
@@ -136,14 +179,98 @@ class ReplayBuffer:
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
         self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
+        self._entropy_bonuses = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
+        self._soft_returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._discount = discount
+        self._batch_size = batch_size
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
         return torch.tensor(data, dtype=torch.float32, device=self._device)
+
+    def compute_returns_to_go(self, data: np.ndarray):
+        n_transitions = data["observations"].shape[0]
+        episode_rewards = []
+        returns_to_go = []
+
+        for i in range(n_transitions):
+            episode_rewards.append(data["rewards"][i])
+            if (
+                data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1
+            ):  # TODO: Could better handle incomplete trajectory case?
+                episode_returns_to_go = discount_cumsum(
+                    np.array(episode_rewards), self._discount
+                )
+                returns_to_go.append(episode_returns_to_go)
+                episode_rewards = []
+
+        returns_to_go = np.array(
+            [
+                return_to_go
+                for episode_returns in returns_to_go
+                for return_to_go in episode_returns
+            ]
+        ).flatten()
+
+        self._returns_to_go[:n_transitions] = self._to_tensor(returns_to_go[..., None])
+
+    def compute_soft_returns_to_go(self, alpha: torch.Tensor, actor: "Actor"):
+        n_transitions = self._states.shape[0]
+        episode_rewards = []
+        episode_entropy_bonuses = []
+        soft_returns_to_go = []
+
+        with torch.no_grad():
+            for i in range((n_transitions // self._batch_size) + 1):
+                batch_states = self._states[
+                    self._batch_size * i : min(self._batch_size * (i + 1), n_transitions)
+                ]
+                pi, log_pi = actor(
+                    batch_states,
+                    need_log_prob=True,
+                )
+                self._entropy_bonuses[
+                    self._batch_size * i : min(self._batch_size * (i + 1), n_transitions)
+                ] = -log_pi.detach().unsqueeze(-1)
+
+        for i in range(n_transitions):
+            episode_rewards.append(self._rewards[i].item())
+            episode_entropy_bonuses.append(self._entropy_bonuses[i].item())
+            if self._dones[i] or i == n_transitions - 1:
+                episode_returns_to_go = discount_cumsum(
+                    self._to_tensor(episode_rewards), self._discount
+                ) + alpha.detach().item() * discount_cumsum(
+                    self._to_tensor(episode_entropy_bonuses),
+                    self._discount,
+                    include_first=False,
+                )
+                soft_returns_to_go.append(episode_returns_to_go)
+                episode_rewards = []
+                episode_entropy_bonuses = []
+
+        self._soft_returns_to_go[:n_transitions] = (
+            self._to_tensor(
+                [
+                    return_to_go
+                    for episode_returns in soft_returns_to_go
+                    for return_to_go in episode_returns
+                ]
+            )
+            .flatten()
+            .unsqueeze(-1)
+        )
+        self._soft_returns_loaded = True
 
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
@@ -154,13 +281,20 @@ class ReplayBuffer:
             raise ValueError(
                 "Replay buffer is smaller than the dataset you are trying to load!"
             )
+
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+
+        self._dones[:n_transitions] = self._to_tensor(
+            (data["terminals"] + data["timeouts"])[..., None]
+        )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
+
+        self.compute_returns_to_go(data)
+        self._soft_returns_loaded = False
 
         print(f"Dataset size: {n_transitions}")
 
@@ -169,9 +303,20 @@ class ReplayBuffer:
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
+        if self._soft_returns_loaded:
+            returns_to_go = self._soft_returns_to_go[indices]
+        else:
+            returns_to_go = self._returns_to_go[indices]
         next_states = self._next_states[indices]
         dones = self._dones[indices]
-        return [states, actions, rewards, next_states, dones]
+        return [
+            states,
+            actions,
+            rewards,
+            returns_to_go,
+            next_states,
+            dones,
+        ]
 
     def add_transition(self):
         # Use this method to add new data into the replay buffer during fine-tuning.
@@ -209,18 +354,29 @@ class VectorizedLinear(nn.Module):
 
 class Actor(nn.Module):
     def __init__(
-        self, state_dim: int, action_dim: int, hidden_dim: int, max_action: float = 1.0
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        max_action: float = 1.0,
+        actor_LN: bool = True,
     ):
         super().__init__()
         self.trunk = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False)
+            if actor_LN
+            else nn.Identity(),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False)
+            if actor_LN
+            else nn.Identity(),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False)
+            if actor_LN
+            else nn.Identity(),
             nn.ReLU(),
         )
         # with separate layers works better than with Linear(hidden_dim, 2 * action_dim)
@@ -244,9 +400,11 @@ class Actor(nn.Module):
         state: torch.Tensor,
         deterministic: bool = False,
         need_log_prob: bool = False,
+        need_policy_dist: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden = self.trunk(state)
         mu, log_sigma = self.mu(hidden), self.log_sigma(hidden)
+        # wandb.log({"policy_sigma": torch.exp(log_sigma).mean()})
 
         # clipping params from EDAC paper, not as in SAC paper (-20, 2)
         log_sigma = torch.clip(log_sigma, -5, 2)
@@ -263,7 +421,23 @@ class Actor(nn.Module):
             log_prob = policy_dist.log_prob(action).sum(axis=-1)
             log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(axis=-1)
 
+        if need_policy_dist:
+            return tanh_action * self.max_action, log_prob, policy_dist
+
         return tanh_action * self.max_action, log_prob
+
+    def log_prob(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        hidden = self.trunk(state)
+        mu, log_sigma = self.mu(hidden), self.log_sigma(hidden)
+
+        # clipping params from EDAC paper, not as in SAC paper (-20, 2)
+        log_sigma = torch.clip(log_sigma, -5, 2)
+        policy_dist = Normal(mu, torch.exp(log_sigma))
+
+        action = torch.clip(action, -self.max_action + 1e-6, self.max_action - 1e-6)
+        log_prob = policy_dist.log_prob(torch.arctanh(action)).sum(axis=-1)
+        log_prob = log_prob - torch.log(1 - action.pow(2) + 1e-6).sum(axis=-1)
+        return log_prob
 
     @torch.no_grad()
     def act(self, state: np.ndarray, device: str) -> np.ndarray:
@@ -275,18 +449,29 @@ class Actor(nn.Module):
 
 class VectorizedCritic(nn.Module):
     def __init__(
-        self, state_dim: int, action_dim: int, hidden_dim: int, num_critics: int
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        num_critics: int,
+        critic_LN: bool = True,
     ):
         super().__init__()
         self.critic = nn.Sequential(
             VectorizedLinear(state_dim + action_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False)
+            if critic_LN
+            else nn.Identity(),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False)
+            if critic_LN
+            else nn.Identity(),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False)
+            if critic_LN
+            else nn.Identity(),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, 1, num_critics),
         )
@@ -325,7 +510,16 @@ class EDAC:
         gamma: float = 0.99,
         tau: float = 0.005,
         eta: float = 1.0,
+        # pretrain_eta: float = 1.0,
         alpha_learning_rate: float = 1e-4,
+        bc_regulariser: float = -1.0,
+        soft_bc_regulariser: float = -1.0,
+        td_component: float = -1.0,
+        pretrain_cql_regulariser: float = -1.0,
+        cql_regulariser: float = -1.0,
+        cql_n_actions: int = 10,
+        kl_regulariser: float = -1.0,
+        actor_kl_regulariser: float = -1.0,
         device: str = "cpu",  # noqa
         actor_std: Optional[float] = None,
         critic_std: Optional[float] = None,
@@ -343,6 +537,24 @@ class EDAC:
         self.tau = tau
         self.gamma = gamma
         self.eta = eta
+        # self.pretrain_eta = eta
+
+        if bc_regulariser > 0.0:
+            assert (
+                soft_bc_regulariser <= 0.0
+            ), "Only consider either hard or soft BC regularisation. Here bc_regulariser and soft_bc_regulariser > 0."
+        self.bc_regulariser = bc_regulariser
+        self.soft_bc_regulariser = soft_bc_regulariser
+        if td_component > 0.0:
+            assert (
+                td_component <= 1.0
+            ), "TD_component_must be between 0 and 1 (default: 0)."
+        self.td_component = td_component
+        self.pretrain_cql_regulariser = pretrain_cql_regulariser
+        self.cql_regulariser = cql_regulariser
+        self.cql_n_actions = cql_n_actions
+        self.kl_regulariser = kl_regulariser
+        self.actor_kl_regulariser = actor_kl_regulariser
 
         self.actor_std = actor_std
         self.critic_std = critic_std
@@ -363,24 +575,60 @@ class EDAC:
 
         return loss
 
-    def _actor_loss(self, state: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
-        action, action_log_prob = self.actor(state, need_log_prob=True)
-        q_value_dist = self.critic(state, action)
+    def _actor_loss(
+        self,
+        state: torch.Tensor,
+        action: torch.Tensor,
+        return_to_go: torch.Tensor,
+    ) -> Tuple[torch.Tensor, float, float]:
+        pi, log_pi, policy_dist = self.actor(
+            state, need_log_prob=True, need_policy_dist=True
+        )
+
+        log_prob_action = self.actor.log_prob(state, action)
+
+        q_value_dist = self.critic(state, pi)
         assert q_value_dist.shape[0] == self.critic.num_critics
-        if self.actor_std is None:
-            q_value_min = q_value_dist.min(0).values
-        else:
-            q_value_min = q_value_dist.mean(0) - self.actor_std * q_value_dist.std(0)
+        q_value_min = q_value_dist.min(0).values
         # needed for logging
         q_value_dist_max = q_value_dist[:, 0].max().item()
         q_value_dist_min = q_value_dist[:, 0].min().item()
         q_value_dist_mean = q_value_dist[:, 0].mean().item()
         q_value_dist_std = q_value_dist[:, 0].std().item()
         q_value_std = q_value_dist.std(0).mean().item()
-        batch_entropy = -action_log_prob.mean().item()
+        batch_entropy = -log_pi.mean().item()
 
-        assert action_log_prob.shape == q_value_min.shape
-        loss = (self.alpha * action_log_prob - q_value_min).mean()
+        assert log_pi.shape == q_value_min.shape
+        if self.bc_regulariser > 0.0:
+            bc_loss = F.mse_loss(pi, action)
+            loss = (self.alpha * log_pi - q_value_min).mean()
+            loss = (
+                loss / loss.detach() + self.bc_regulariser * bc_loss / bc_loss.detach()
+            )
+        elif self.soft_bc_regulariser > 0.0:
+            bc_loss = (self.alpha * log_pi - log_prob_action).mean()
+            loss = (self.soft_bc_regulariser * bc_loss / bc_loss) - (
+                q_value_min.mean() / q_value_min.mean().detach()
+            )
+            loss = (self.alpha * log_pi - q_value_min).mean()
+            loss = (
+                loss / loss.detach() - self.soft_bc_regulariser * log_prob_action.mean()
+            )
+        else:
+            loss = (self.alpha * log_pi - q_value_min).mean()
+
+        if self.actor_kl_regulariser > 0.0:
+            (
+                pretrained_action,
+                pretrained_log_prob,
+                pretrained_policy_dist,
+            ) = self.pretrained_actor(state, need_policy_dist=True)
+            KL_regulariser = torch.distributions.kl.kl_divergence(
+                policy_dist, pretrained_policy_dist
+            ).mean()
+            loss = loss / loss.detach() + self.actor_kl_regulariser * KL_regulariser / (
+                KL_regulariser.detach() + 1e-6
+            )
 
         return (
             loss,
@@ -445,27 +693,166 @@ class EDAC:
             next_action, next_action_log_prob = self.actor(
                 next_state, need_log_prob=True
             )
-            if self.critic_std is None:
-                q_next = self.target_critic(next_state, next_action).min(0).values
-            else:
-                q_nexts = self.target_critic(next_state, next_action)
-                q_next = q_nexts.mean(0) - self.critic_std * q_nexts.std(0)
+            q_next = self.target_critic(next_state, next_action).min(0).values
             q_next = q_next - self.alpha * next_action_log_prob
 
             assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
             q_target = reward + self.gamma * (1 - done) * q_next.unsqueeze(-1)
 
         q_values = self.critic(state, action)
+
         # [ensemble_size, batch_size] - [1, batch_size]
         critic_loss = ((q_values - q_target.view(1, -1)) ** 2).mean(dim=1).sum(dim=0)
         diversity_loss = self._critic_diversity_loss(state, action)
 
         loss = critic_loss + self.eta * diversity_loss
 
+        if self.kl_regulariser > 0.0:
+            pretrained_q_values = self.pretrained_critic(state, action)
+
+            KL_regulariser = F.mse_loss(
+                q_values.min(0).values, pretrained_q_values.min(0).values
+            )
+            loss = loss / loss.detach() + self.kl_regulariser * KL_regulariser / (
+                KL_regulariser.detach() + 1e-6
+            )
+        if self.cql_regulariser > 0.0:
+            random_actions = action.new_empty(
+                (self.cql_n_actions * action.shape[0], action.shape[1]),
+                requires_grad=False,
+            ).uniform_(-1, 1)
+            repeated_state = state.repeat(self.cql_n_actions, 1)
+            q_random_values = self.critic(repeated_state, random_actions).reshape(
+                q_values.shape[0], q_values.shape[1], self.cql_n_actions
+            )
+            cql_regulariser = (
+                torch.logsumexp(
+                    q_random_values.min(0).values,
+                    dim=-1,
+                )
+                - q_values.min(0).values
+            ).mean()
+
+            loss = (
+                loss / loss.detach()
+                + self.cql_regulariser * cql_regulariser / cql_regulariser.detach()
+            )
+
         return loss
 
+    def pretrain_BC(self, batch: TensorBatch) -> Dict[str, float]:
+        state, action, reward, return_to_go, next_state, done = batch
+        # Alpha update
+        alpha_loss = self._alpha_loss(state)
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+        self.alpha = self.log_alpha.exp().detach()
+
+        # Compute actor loss
+        pi, log_pi = self.actor(state, need_log_prob=True)
+        log_prob_action = self.actor.log_prob(state, action)
+        actor_loss = (self.alpha * log_pi - log_prob_action).mean()
+
+        # Optimize the actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        log_dict = {
+            "alpha_loss": alpha_loss.item(),
+            "actor_loss": actor_loss.item(),
+            "batch_entropy": -log_pi.mean().item(),
+            "alpha": self.alpha.item(),
+        }
+
+        return log_dict
+
+    def pretrain_soft_critic(
+        self, batch: TensorBatch, epoch, pretrain_epochs
+    ) -> Dict[str, float]:
+        state, action, reward, return_to_go, next_state, done = batch
+
+        log_dict = {}
+        q_values = self.critic(state, action)
+
+        # Compute critic loss
+        # [ensemble_size, batch_size] - [1, batch_size]
+        MC_critic_loss = ((q_values - return_to_go.view(1, -1)) ** 2).mean()
+        diversity_loss = self._critic_diversity_loss(state, action)
+        critic_loss = MC_critic_loss + self.eta * diversity_loss
+        log_dict["MC_critic_loss"] = MC_critic_loss.item()
+        log_dict["diversity_loss"] = diversity_loss.item()
+
+        if self.td_component > 0.0:
+            with torch.no_grad():
+                next_action, next_action_log_prob = self.actor(
+                    next_state, need_log_prob=True
+                )
+                q_next = self.target_critic(next_state, next_action).min(0).values
+                q_next = q_next - self.alpha * next_action_log_prob
+
+                assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
+                q_target0 = reward + self.gamma * (1 - done) * q_next.unsqueeze(-1)
+
+            # [ensemble_size, batch_size] - [1, batch_size]
+            TD_critic_loss = (
+                ((q_values - q_target0.view(1, -1)) ** 2).mean(dim=1).sum(dim=0)
+            )
+            critic_loss = (
+                ((1 - self.td_component) * MC_critic_loss / MC_critic_loss.detach())
+                + self.td_component * TD_critic_loss / TD_critic_loss.detach()
+                + self.eta * diversity_loss
+            )
+            log_dict["TD_critic_loss"] = TD_critic_loss.item()
+
+        if self.pretrain_cql_regulariser > 0.0:
+            random_actions = action.new_empty(
+                (self.cql_n_actions * action.shape[0], action.shape[1]),
+                requires_grad=False,
+            ).uniform_(-1, 1)
+            repeated_state = state.repeat(self.cql_n_actions, 1)
+            q_random_values = self.critic(repeated_state, random_actions).reshape(
+                q_values.shape[0], q_values.shape[1], self.cql_n_actions
+            )
+            cql_regulariser = (
+                torch.logsumexp(
+                    q_random_values.min(0).values,
+                    dim=-1,
+                )
+                - q_values.min(0).values
+            ).mean()
+
+            critic_loss = (
+                critic_loss / critic_loss.detach()
+                + self.pretrain_cql_regulariser
+                * cql_regulariser
+                / cql_regulariser.detach()
+            )
+            log_dict["cql_regulariser"] = cql_regulariser.item()
+
+        # Optimize the critic
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        #  Target networks soft update
+        with torch.no_grad():
+            soft_update(self.target_critic, self.critic, self.tau)
+            # for logging, Q-ensemble std estimate with the random actions:
+            # a ~ U[-max_action, max_action]
+            max_action = self.actor.max_action
+            random_actions = -max_action + 2 * max_action * torch.rand_like(action)
+
+            q_random_std = self.critic(state, random_actions).std(0).mean().item()
+            log_dict["q_random_std"] = q_random_std
+
+        return log_dict
+
     def update(self, batch: TensorBatch) -> Dict[str, float]:
-        state, action, reward, next_state, done = [arr.to(self.device) for arr in batch]
+        state, action, reward, return_to_go, next_state, done = [
+            arr.to(self.device) for arr in batch
+        ]
         # Usually updates are done in the following order: critic -> actor -> alpha
         # But we found that EDAC paper uses reverse (which gives better results)
 
@@ -474,19 +861,12 @@ class EDAC:
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
         self.alpha_optimizer.step()
-
-        self.alpha = self.log_alpha.exp().detach()
+        self.alpha = torch.clip(self.log_alpha, -10, 10).exp().detach()
 
         # Actor update
-        (
-            actor_loss,
-            actor_batch_entropy,
-            q_policy_std,
-            q_value_dist_max,
-            q_value_dist_min,
-            q_value_dist_mean,
-            q_value_dist_std,
-        ) = self._actor_loss(state)
+        actor_loss, actor_batch_entropy, q_policy_std = self._actor_loss(
+            state, action, return_to_go
+        )
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
@@ -549,18 +929,15 @@ class EDAC:
 def eval_actor(
     env: gym.Env,
     actor: Actor,
-    critic: VectorizedCritic,
     device: str,
     n_episodes: int,
     seed: int,
-    name: str,
     render: bool,
+    name: str,
 ) -> np.ndarray:
     env.seed(seed)
     actor.eval()
     episode_rewards = []
-    episode_q_values = []
-    episode_q_stds = []
     video = VideoRecorder() if render else None
     for i in range(n_episodes):
         state, done = env.reset(), False
@@ -580,7 +957,7 @@ def eval_actor(
             action = actor.act(state, device)
             state, reward, done, _ = env.step(action)
             episode_reward += reward
-            if video is not None and i < 3:
+            if video is not None and i == 0:  # Record 1 episode
                 video.record(env)
         episode_rewards.append(episode_reward)
         episode_q_values.append(q_values.mean().detach().cpu())
@@ -589,11 +966,9 @@ def eval_actor(
     if video is not None:
         video.save(name)
     actor.train()
-    return (
-        np.array(episode_rewards),
-        np.array(episode_q_values),
-        np.array(episode_q_stds),
-    )
+    if video is not None:
+        video.save(name, wandb=wandb)
+    return np.array(episode_rewards)
 
 
 def return_reward_range(dataset, max_episode_steps):
@@ -626,29 +1001,51 @@ def train(config: TrainConfig):
     wandb_init(asdict(config))
 
     # data, evaluation, env setup
-    eval_env = wrap_env(gym.make(config.env_name))
-    state_dim = eval_env.observation_space.shape[0]
-    action_dim = eval_env.action_space.shape[0]
+    env = gym.make(config.env_name)
 
-    d4rl_dataset = eval_env.get_dataset()
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.shape[0]
+
+    d4rl_dataset = env.get_dataset()
 
     if config.normalize_reward:
         modify_reward(d4rl_dataset, config.env_name)
+
+    state_mean, state_std = compute_mean_std(d4rl_dataset["observations"], eps=1e-3)
+
+    if "next_observations" not in d4rl_dataset.keys():
+        d4rl_dataset["next_observations"] = np.roll(
+            d4rl_dataset["observations"], shift=-1, axis=0
+        )  # Terminals/timeouts block next observations
+        print("Loaded next state observations from current state observations.")
+
+    d4rl_dataset["observations"] = normalize_states(
+        d4rl_dataset["observations"], state_mean, state_std
+    )
+    d4rl_dataset["next_observations"] = normalize_states(
+        d4rl_dataset["next_observations"], state_mean, state_std
+    )
+
+    eval_env = wrap_env(env, state_mean=state_mean, state_std=state_std)
 
     buffer = ReplayBuffer(
         state_dim=state_dim,
         action_dim=action_dim,
         buffer_size=config.buffer_size,
+        batch_size=config.batch_size,
+        discount=config.gamma,
         device=config.device,
     )
     buffer.load_d4rl_dataset(d4rl_dataset)
 
     # Actor & Critic setup
-    actor = Actor(state_dim, action_dim, config.hidden_dim, config.max_action)
+    actor = Actor(
+        state_dim, action_dim, config.hidden_dim, config.max_action, config.actor_LN
+    )
     actor.to(config.device)
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_learning_rate)
     critic = VectorizedCritic(
-        state_dim, action_dim, config.hidden_dim, config.num_critics
+        state_dim, action_dim, config.hidden_dim, config.num_critics, config.critic_LN
     )
     critic.to(config.device)
     critic_optimizer = torch.optim.Adam(
@@ -663,7 +1060,15 @@ def train(config: TrainConfig):
         gamma=config.gamma,
         tau=config.tau,
         eta=config.eta,
+        # pretrain_eta=config.pretrain_eta,
         alpha_learning_rate=config.alpha_learning_rate,
+        bc_regulariser=config.bc_regulariser,
+        td_component=config.td_component,
+        pretrain_cql_regulariser=config.pretrain_cql_regulariser,
+        cql_regulariser=config.cql_regulariser,
+        cql_n_actions=config.cql_n_actions,
+        kl_regulariser=config.kl_regulariser,
+        actor_kl_regulariser=config.actor_kl_regulariser,
         device=config.device,
         actor_std=config.actor_std,
         critic_std=config.critic_std,
@@ -680,7 +1085,49 @@ def train(config: TrainConfig):
         # training
         for _ in trange(config.num_updates_on_epoch, desc="Epoch", leave=False):
             batch = buffer.sample(config.batch_size)
-            update_info = trainer.update(batch)
+            if config.pretrain is not None:
+                if epoch <= config.pretrain_epochs:
+                    if config.pretrain == "BC":
+                        update_info = trainer.pretrain_BC(batch)
+                    elif config.pretrain == "softAC":
+                        if epoch < config.pretrain_epochs // (
+                            1 / config.percentage_pretrain_BC
+                        ):
+                            update_info = trainer.pretrain_BC(batch)
+                        else:
+                            if buffer._soft_returns_loaded == False:
+                                buffer.compute_soft_returns_to_go(
+                                    alpha=trainer.alpha,
+                                    actor=trainer.actor,
+                                )
+                                print("Soft returns to go loaded for BC actor!")
+                            assert buffer._soft_returns_loaded == True
+                            update_info = trainer.pretrain_soft_critic(
+                                batch, epoch, config.pretrain_epochs
+                            )
+                    elif config.pretrain == "softC":
+                        if buffer._soft_returns_loaded == False:
+                            buffer.compute_soft_returns_to_go(
+                                alpha=trainer.alpha,
+                                actor=trainer.actor,
+                            )
+                            print("Soft returns to go loaded for initialised actor!")
+                        assert buffer._soft_returns_loaded == True
+                        update_info = trainer.pretrain_soft_critic(
+                            batch, epoch, config.pretrain_epochs
+                        )
+                    else:
+                        raise ValueError(
+                            f"Pretrain type {config.pretrain} not recognised."
+                        )
+                else:
+                    if epoch == config.pretrain_epochs + 1:
+                        with torch.no_grad():
+                            trainer.pretrained_critic = deepcopy(trainer.critic)
+                            trainer.pretrained_actor = deepcopy(trainer.actor)
+                    update_info = trainer.update(batch)
+            else:
+                update_info = trainer.update(batch)
 
             if total_updates % config.log_every == 0:
                 wandb.log({"epoch": epoch, **update_info})
@@ -696,8 +1143,8 @@ def train(config: TrainConfig):
                 n_episodes=config.eval_episodes,
                 seed=config.eval_seed,
                 device=config.device,
-                name=config.name,
                 render=False,
+                name=config.name,
             )
             eval_log = {
                 "eval/reward_mean": np.mean(eval_returns),
@@ -720,27 +1167,18 @@ def train(config: TrainConfig):
                 )
 
     # testing
-    test_returns, test_q_values, test_q_stds = eval_actor(
+    test_returns = eval_actor(
         env=eval_env,
         actor=actor,
-        critic=critic,
         n_episodes=100,
-        seed=config.test_seed,
+        seed=config.eval_seed,
         device=config.device,
-        name=config.name,
         render=config.render,
-    )
-    alg_name, env_name, data_name, version, id = config.name.split("-")
-    video_path = (
-        Path("./videos")
-        .joinpath(f"{env_name}-{data_name}/{alg_name}")
-        .joinpath(f"{config.name}.mp4")
+        name=config.name,
     )
     test_log = {
         "test/reward_mean": np.mean(test_returns),
-        "video": wandb.Video(
-            str(video_path), caption="Final agent behaviour", fps=20, format="mp4"
-        ),
+        "test/reward_std": np.std(test_returns),
     }
     if hasattr(eval_env, "get_normalized_score"):
         normalized_score = eval_env.get_normalized_score(test_returns) * 100.0

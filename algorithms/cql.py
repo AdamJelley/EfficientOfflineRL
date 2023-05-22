@@ -40,8 +40,8 @@ class TrainConfig:
     alpha_multiplier: float = 1.0  # Multiplier for alpha in loss
     use_automatic_entropy_tuning: bool = True  # Tune entropy
     backup_entropy: bool = False  # Use backup entropy
-    policy_lr: bool = 3e-5  # Policy learning rate
-    qf_lr: bool = 3e-4  # Critics learning rate
+    policy_lr: float = 3e-5  # Policy learning rate
+    qf_lr: float = 3e-4  # Critics learning rate
     soft_target_update_rate: float = 5e-3  # Target network update rate
     bc_steps: int = int(0)  # Number of BC steps at start
     target_update_period: int = 1  # Frequency of target nets updates
@@ -57,6 +57,7 @@ class TrainConfig:
     orthogonal_init: bool = True  # Orthogonal initialization
     normalize: bool = True  # Normalize states
     normalize_reward: bool = False  # Normalize reward
+    AC_pretrain_steps: int = 0  # Pretrain actor and critic
     # Wandb logging
     project: str = "CORL"
     group: str = "CQL-D4RL"
@@ -81,6 +82,19 @@ def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.nda
 
 def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
     return (states - mean) / std
+
+
+def discount_cumsum(x, discount, include_first=True):
+    disc_cumsum = np.zeros_like(x)
+    if include_first:
+        disc_cumsum[-1] = x[-1]
+        for t in reversed(range(x.shape[0] - 1)):
+            disc_cumsum[t] = x[t] + discount * disc_cumsum[t + 1]
+    else:
+        disc_cumsum[-1] = 0
+        for t in reversed(range(x.shape[0] - 1)):
+            disc_cumsum[t] = discount * x[t + 1] + discount * disc_cumsum[t + 1]
+    return disc_cumsum
 
 
 def wrap_env(
@@ -111,6 +125,7 @@ class ReplayBuffer:
         state_dim: int,
         action_dim: int,
         buffer_size: int,
+        discount: float,
         device: str = "cpu",
     ):
         self._buffer_size = buffer_size
@@ -124,14 +139,126 @@ class ReplayBuffer:
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
         self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
+        self._next_returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
+        self._entropy_bonuses = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
+        self._soft_returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
+        self._next_soft_returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._discount = discount
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
         return torch.tensor(data, dtype=torch.float32, device=self._device)
+
+    def compute_returns_to_go(self, data: np.ndarray) -> np.ndarray:
+        n_transitions = data["observations"].shape[0]
+        episode_rewards = []
+        returns_to_go = []
+
+        for i in range(n_transitions):
+            episode_rewards.append(
+                data["rewards"][i]
+            )  # - 1* self._action_dim* torch.log(1 / torch.sqrt(torch.tensor(2 * np.pi))))
+            if (
+                data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1
+            ):  # TODO: Deal with incomplete trajectory case
+                episode_returns_to_go = discount_cumsum(
+                    np.array(episode_rewards), self._discount
+                )
+                returns_to_go.append(episode_returns_to_go)
+                episode_rewards = []
+
+        returns_to_go = np.array(
+            [
+                return_to_go
+                for episode_returns in returns_to_go
+                for return_to_go in episode_returns
+            ]
+        ).flatten()
+
+        next_returns_to_go = np.roll(
+            returns_to_go, shift=-1, axis=0
+        )  # Terminals/timeouts block next returns to go
+        assert next_returns_to_go[0] == returns_to_go[1]
+
+        self._returns_to_go[:n_transitions] = self._to_tensor(returns_to_go[..., None])
+        self._next_returns_to_go[:n_transitions] = self._to_tensor(
+            next_returns_to_go[..., None]
+        )
+
+    def compute_soft_returns_to_go(
+        self,
+        data: np.ndarray,
+        alpha: torch.Tensor,
+        actor: "TanhGaussianPolicy",
+    ) -> np.ndarray:
+        n_transitions = self._states.shape[0]
+        episode_rewards = []
+        episode_entropy_bonuses = []
+        soft_returns_to_go = []
+
+        entropy_batch_size = 512
+        with torch.no_grad():
+            for i in range((n_transitions // entropy_batch_size) + 1):
+                batch_states = self._states[
+                    entropy_batch_size
+                    * i : min(entropy_batch_size * (i + 1), n_transitions)
+                ]
+                pi, log_pi = actor(batch_states)
+                self._entropy_bonuses[
+                    entropy_batch_size
+                    * i : min(entropy_batch_size * (i + 1), n_transitions)
+                ] = (-log_pi.detach().unsqueeze(-1).cpu())
+
+        for i in range(n_transitions):
+            episode_rewards.append(self._rewards[i].cpu().item())
+            episode_entropy_bonuses.append(self._entropy_bonuses[i].cpu().item())
+            if self._dones[i] or i == n_transitions - 1:
+                episode_returns_to_go = discount_cumsum(
+                    np.array(episode_rewards), self._discount
+                ) + alpha.detach().cpu().item() * discount_cumsum(
+                    np.array(episode_entropy_bonuses),
+                    self._discount,
+                    include_first=False,
+                )
+                soft_returns_to_go.append(episode_returns_to_go)
+                episode_rewards = []
+                episode_entropy_bonuses = []
+
+        soft_returns_to_go = np.array(
+            [
+                return_to_go
+                for episode_returns in soft_returns_to_go
+                for return_to_go in episode_returns
+            ]
+        ).flatten()
+
+        next_soft_returns_to_go = np.roll(
+            soft_returns_to_go, shift=-1, axis=0
+        )  # Terminals/timeouts block next soft returns to go
+        assert next_soft_returns_to_go[0] == soft_returns_to_go[1]
+
+        self._soft_returns_to_go[:n_transitions] = self._to_tensor(
+            soft_returns_to_go[..., None]
+        )
+        self._next_soft_returns_to_go[:n_transitions] = self._to_tensor(
+            next_soft_returns_to_go[..., None]
+        )
+        self._soft_returns_loaded = True
 
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
@@ -150,6 +277,9 @@ class ReplayBuffer:
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
+        self.compute_returns_to_go(data)
+        self._soft_returns_loaded = False
+
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
@@ -157,9 +287,23 @@ class ReplayBuffer:
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
+        if self._soft_returns_loaded:
+            returns_to_go = self._soft_returns_to_go[indices]
+            next_returns_to_go = self._next_soft_returns_to_go[indices]
+        else:
+            returns_to_go = self._returns_to_go[indices]
+            next_returns_to_go = self._next_returns_to_go[indices]
         next_states = self._next_states[indices]
         dones = self._dones[indices]
-        return [states, actions, rewards, next_states, dones]
+        return [
+            states,
+            actions,
+            rewards,
+            returns_to_go,
+            next_states,
+            next_returns_to_go,
+            dones,
+        ]
 
     def add_transition(self):
         # Use this method to add new data into the replay buffer during fine-tuning.
@@ -313,10 +457,13 @@ class TanhGaussianPolicy(nn.Module):
 
         self.base_network = nn.Sequential(
             nn.Linear(state_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 2 * action_dim),
         )
@@ -333,6 +480,7 @@ class TanhGaussianPolicy(nn.Module):
     def log_prob(
         self, observations: torch.Tensor, actions: torch.Tensor
     ) -> torch.Tensor:
+        actions = torch.clip(actions, -self.max_action + 1e-6, self.max_action - 1e-6)
         if actions.ndim == 3:
             observations = extend_and_repeat(observations, 1, actions.shape[1])
         base_network_output = self.base_network(observations)
@@ -376,10 +524,13 @@ class FullyConnectedQFunction(nn.Module):
 
         self.network = nn.Sequential(
             nn.Linear(observation_dim + action_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(256, 1),
         )
@@ -488,6 +639,7 @@ class ContinuousCQL:
             )
         else:
             self.log_alpha = None
+        self.alpha = self.log_alpha().exp()
 
         self.log_alpha_prime = Scalar(1.0)
         self.alpha_prime_optimizer = torch.optim.Adam(
@@ -510,6 +662,7 @@ class ContinuousCQL:
         else:
             alpha_loss = observations.new_tensor(0.0)
             alpha = observations.new_tensor(self.alpha_multiplier)
+        self.alpha = alpha
         return alpha, alpha_loss
 
     def _policy_loss(
@@ -709,12 +862,93 @@ class ContinuousCQL:
 
         return qf_loss, alpha_prime, alpha_prime_loss
 
+    def pretrain_BC(self, batch: TensorBatch):
+        (
+            observations,
+            actions,
+            rewards,
+            return_to_go,
+            next_observations,
+            next_return_to_go,
+            dones,
+        ) = batch
+        self.total_it += 1
+
+        with torch.no_grad():
+            pi, log_pi = self.actor(observations)
+
+        alpha, alpha_loss = self._alpha_and_alpha_loss(observations, log_pi)
+        if self.use_automatic_entropy_tuning:
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
+
+        pi, log_pi = self.actor(observations)
+        log_probs = self.actor.log_prob(observations, actions)
+        policy_loss = (self.alpha * log_pi - log_probs).mean()
+
+        self.actor_optimizer.zero_grad()
+        policy_loss.backward()
+        self.actor_optimizer.step()
+
+        log_dict = dict(
+            log_pi=log_pi.mean().item(),
+            policy_loss=policy_loss.item(),
+            alpha_loss=alpha_loss.item(),
+            alpha=alpha.item(),
+        )
+
+        return log_dict
+
+    def pretrain_softC(self, batch):
+        (
+            observations,
+            actions,
+            rewards,
+            return_to_go,
+            next_observations,
+            next_return_to_go,
+            dones,
+        ) = batch
+        self.total_it += 1
+
+        q1_values = self.critic_1(observations, actions)
+        q2_values = self.critic_2(observations, actions)
+
+        with torch.no_grad():
+            next_action, next_log_prob = self.actor(next_observations)
+
+            q_next = (
+                next_return_to_go - self.log_alpha().exp() * next_log_prob.unsqueeze(-1)
+            )
+            q_target = (rewards + self.discount * (1 - dones) * q_next).squeeze(-1)
+
+        qf_loss = F.mse_loss(q1_values, q_target) + F.mse_loss(q2_values, q_target)
+
+        log_dict = dict(
+            qf_loss=qf_loss.item(),
+            average_target_q=q_target.mean().item(),
+        )
+
+        self.critic_1_optimizer.zero_grad()
+        self.critic_2_optimizer.zero_grad()
+        qf_loss.backward(retain_graph=True)
+        self.critic_1_optimizer.step()
+        self.critic_2_optimizer.step()
+
+        if self.total_it % self.target_update_period == 0:
+            self.update_target_network(self.soft_target_update_rate)
+
+        return log_dict
+
     def train(self, batch: TensorBatch) -> Dict[str, float]:
         (
             observations,
             actions,
             rewards,
+            return_to_go,
             next_observations,
+            next_return_to_go,
             dones,
         ) = batch
         self.total_it += 1
@@ -812,7 +1046,7 @@ def train(config: TrainConfig):
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    dataset = d4rl.qlearning_dataset(env)
+    dataset = env.get_dataset()  # d4rl.qlearning_dataset(env)
 
     if config.normalize_reward:
         modify_reward(dataset, config.env)
@@ -821,6 +1055,12 @@ def train(config: TrainConfig):
         state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-3)
     else:
         state_mean, state_std = 0, 1
+
+    if "next_observations" not in dataset.keys():
+        dataset["next_observations"] = np.roll(
+            dataset["observations"], shift=-1, axis=0
+        )  # Terminals/timeouts block next observations
+        print("Loaded next state observations from current state observations.")
 
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
@@ -833,6 +1073,7 @@ def train(config: TrainConfig):
         state_dim,
         action_dim,
         config.buffer_size,
+        config.discount,
         config.device,
     )
     replay_buffer.load_d4rl_dataset(dataset)
@@ -911,7 +1152,21 @@ def train(config: TrainConfig):
     for t in range(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
-        log_dict = trainer.train(batch)
+        if trainer.total_it < config.AC_pretrain_steps:
+            if trainer.total_it < config.AC_pretrain_steps // 2:
+                log_dict = trainer.pretrain_BC(batch)
+            else:
+                if replay_buffer._soft_returns_loaded == False:
+                    replay_buffer.compute_soft_returns_to_go(
+                        data=dataset,
+                        alpha=trainer.alpha,
+                        actor=trainer.actor,
+                    )
+                    print("Soft returns to go loaded for BC actor!")
+                assert replay_buffer._soft_returns_loaded == True
+                log_dict = trainer.pretrain_softC(batch)
+        else:
+            log_dict = trainer.train(batch)
         wandb.log(log_dict, step=trainer.total_it)
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
@@ -932,10 +1187,11 @@ def train(config: TrainConfig):
                 f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
             )
             print("---------------------------------------")
-            torch.save(
-                trainer.state_dict(),
-                os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
-            )
+            if config.checkpoints_path:
+                torch.save(
+                    trainer.state_dict(),
+                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                )
             wandb.log(
                 {"d4rl_normalized_score": normalized_eval_score},
                 step=trainer.total_it,

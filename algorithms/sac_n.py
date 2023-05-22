@@ -20,6 +20,7 @@ import pyrallis
 import torch
 from torch.distributions import Normal
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import trange
 import wandb
 
@@ -27,7 +28,7 @@ import wandb
 @dataclass
 class TrainConfig:
     # wandb params
-    project: str = "CORL"
+    project: str = "offline-RL-init"
     group: str = "SAC-N"
     name: str = "SAC-N"
     # model params
@@ -56,6 +57,8 @@ class TrainConfig:
     eval_seed: int = 42
     log_every: int = 100
     device: str = "cpu"
+    pretrain: Optional[str] = None  # BC or AC
+    pretrain_epochs: int = 10
 
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
@@ -96,6 +99,24 @@ def set_seed(
     torch.use_deterministic_algorithms(deterministic_torch)
 
 
+def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
+    mean = states.mean(0)
+    std = states.std(0) + eps
+    return mean, std
+
+
+def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
+    return (states - mean) / std
+
+
+def discount_cumsum(x, discount):
+    disc_cumsum = np.zeros_like(x)
+    disc_cumsum[-1] = x[-1]
+    for t in reversed(range(x.shape[0] - 1)):
+        disc_cumsum[t] = x[t] + discount * disc_cumsum[t + 1]
+    return disc_cumsum
+
+
 def wrap_env(
     env: gym.Env,
     state_mean: Union[np.ndarray, float] = 0.0,
@@ -120,6 +141,7 @@ class ReplayBuffer:
         state_dim: int,
         action_dim: int,
         buffer_size: int,
+        discount: float,
         device: str = "cpu",
     ):
         self._buffer_size = buffer_size
@@ -133,10 +155,14 @@ class ReplayBuffer:
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
         self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._discount = discount
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
@@ -151,11 +177,38 @@ class ReplayBuffer:
             raise ValueError(
                 "Replay buffer is smaller than the dataset you are trying to load!"
             )
+
+        episode_rewards = []
+        returns_to_go = []
+
+        for i in range(n_transitions):
+            if data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1:
+                episode_rewards.append(data["rewards"][i])
+                episode_returns_to_go = discount_cumsum(
+                    np.array(episode_rewards), self._discount
+                )
+                returns_to_go.append(episode_returns_to_go)
+                episode_rewards = []
+            else:
+                episode_rewards.append(data["rewards"][i])
+        data["returns_to_go"] = np.array(
+            [
+                return_to_go
+                for episode_returns in returns_to_go
+                for return_to_go in episode_returns
+            ]
+        ).flatten()
+
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
+        self._returns_to_go[:n_transitions] = self._to_tensor(
+            data["returns_to_go"][..., None]
+        )
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._dones[:n_transitions] = self._to_tensor(
+            (data["terminals"] + data["timeouts"])[..., None]
+        )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
@@ -166,9 +219,10 @@ class ReplayBuffer:
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
+        returns_to_go = self._returns_to_go[indices]
         next_states = self._next_states[indices]
         dones = self._dones[indices]
-        return [states, actions, rewards, next_states, dones]
+        return [states, actions, rewards, returns_to_go, next_states, dones]
 
     def add_transition(self):
         # Use this method to add new data into the replay buffer during fine-tuning.
@@ -211,10 +265,13 @@ class Actor(nn.Module):
         super().__init__()
         self.trunk = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
         )
         # with separate layers works better than with Linear(hidden_dim, 2 * action_dim)
@@ -222,7 +279,7 @@ class Actor(nn.Module):
         self.log_sigma = nn.Linear(hidden_dim, action_dim)
 
         # init as in the EDAC paper
-        for layer in self.trunk[::2]:
+        for layer in self.trunk[::3]:
             torch.nn.init.constant_(layer.bias, 0.1)
 
         torch.nn.init.uniform_(self.mu.weight, -1e-3, 1e-3)
@@ -274,15 +331,18 @@ class VectorizedCritic(nn.Module):
         super().__init__()
         self.critic = nn.Sequential(
             VectorizedLinear(state_dim + action_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
+            nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, 1, num_critics),
         )
         # init as in the EDAC paper
-        for layer in self.critic[::2]:
+        for layer in self.critic[::3]:
             torch.nn.init.constant_(layer.bias, 0.1)
 
         torch.nn.init.uniform_(self.critic[-1].weight, -3e-3, 3e-3)
@@ -381,8 +441,52 @@ class SACN:
 
         return loss
 
+    def pretrain_BC(self, batch: TensorBatch) -> Dict[str, float]:
+        log_dict = {}
+
+        state, action, reward, return_to_go, next_state, done = batch
+        # Compute actor loss
+        pi = self.actor(state)[0]  # No log prob
+        actor_loss = F.mse_loss(pi, action)
+        log_dict["actor_loss"] = actor_loss.item()
+        # Optimize the actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        return log_dict
+
+    def pretrain_actorcritic(self, batch: TensorBatch) -> Dict[str, float]:
+        log_dict = {}
+
+        state, action, reward, return_to_go, next_state, done = batch
+        # Compute actor loss
+        pi = self.actor(state)[0]  # No log prob
+        actor_loss = F.mse_loss(pi, action)
+        log_dict["actor_loss"] = actor_loss.item()
+        # Optimize the actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        # Compute critic loss
+        q = self.critic(state, action).mean(dim=0)
+        critic_loss = F.mse_loss(q, return_to_go.squeeze())
+        log_dict["critic_loss"] = critic_loss.item()
+        # Optimize the critic
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        # Update the frozen target models
+        soft_update(self.target_critic, self.critic, self.tau)
+
+        return log_dict
+
     def update(self, batch: TensorBatch) -> Dict[str, float]:
-        state, action, reward, next_state, done = [arr.to(self.device) for arr in batch]
+        state, action, reward, return_to_go, next_state, done = [
+            arr.to(self.device) for arr in batch
+        ]
         # Usually updates are done in the following order: critic -> actor -> alpha
         # But we found that EDAC paper uses reverse (which gives better results)
 
@@ -500,19 +604,31 @@ def train(config: TrainConfig):
     wandb_init(asdict(config))
 
     # data, evaluation, env setup
-    eval_env = wrap_env(gym.make(config.env_name))
-    state_dim = eval_env.observation_space.shape[0]
-    action_dim = eval_env.action_space.shape[0]
+    env = gym.make(config.env_name)
 
-    d4rl_dataset = eval_env.get_dataset()
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.shape[0]
+
+    d4rl_dataset = env.get_dataset()
 
     if config.normalize_reward:
-        modify_reward(d4rl_dataset, config.env_name)
+        modify_reward(d4rl_dataset, config.env)
+
+    state_mean, state_std = compute_mean_std(d4rl_dataset["observations"], eps=1e-3)
+
+    d4rl_dataset["observations"] = normalize_states(
+        d4rl_dataset["observations"], state_mean, state_std
+    )
+    d4rl_dataset["next_observations"] = normalize_states(
+        d4rl_dataset["next_observations"], state_mean, state_std
+    )
+    eval_env = wrap_env(env, state_mean=state_mean, state_std=state_std)
 
     buffer = ReplayBuffer(
         state_dim=state_dim,
         action_dim=action_dim,
         buffer_size=config.buffer_size,
+        discount=config.gamma,
         device=config.device,
     )
     buffer.load_d4rl_dataset(d4rl_dataset)
@@ -551,7 +667,24 @@ def train(config: TrainConfig):
         # training
         for _ in trange(config.num_updates_on_epoch, desc="Epoch", leave=False):
             batch = buffer.sample(config.batch_size)
-            update_info = trainer.update(batch)
+            if config.pretrain is not None:
+                if epoch <= config.pretrain_epochs:
+                    if config.pretrain == "BC":
+                        update_info = trainer.pretrain_BC(batch)
+                    elif config.pretrain == "AC":
+                        update_info = trainer.pretrain_actorcritic(batch)
+                    else:
+                        raise ValueError(
+                            f"Pretrain type {config.pretrain} not recognised."
+                        )
+                    # if t == 10000:
+                    #     trainer.actor_target = copy.deepcopy(trainer.actor)
+                    #     trainer.critic_1_target = copy.deepcopy(trainer.critic_1)
+                    #     trainer.critic_2_target = copy.deepcopy(trainer.critic_2)
+                else:
+                    update_info = trainer.update(batch)
+            else:
+                update_info = trainer.update(batch)
 
             if total_updates % config.log_every == 0:
                 wandb.log({"epoch": epoch, **update_info})

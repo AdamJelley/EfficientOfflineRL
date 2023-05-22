@@ -13,5 +13,5 @@ max_traj_len: 1000
 n_episodes: 100
 name: BC
 normalize: true
-project: CORL
+project: offline-RL-init
 seed: 0

@@ -20,6 +20,6 @@ normalize_reward: false
 num_critics: 20
 num_epochs: 3000
 num_updates_on_epoch: 1000
-project: "CORL"
+project: offline-RL-init
 tau: 0.005
 train_seed: 10

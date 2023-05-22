@@ -44,8 +44,17 @@ class TrainConfig:
     alpha: float = 2.5  # Coefficient for Q function in actor loss
     normalize: bool = True  # Normalize states
     normalize_reward: bool = False  # Normalize reward
+    pretrain: Optional[str] = None  # BC or AC
+    pretrain_steps: int = 10000  # Number of pretraining steps
+    td_component: float = -1.0  # Proportion of TD to use (rather than MC) in pretraining
+    pretrain_cql_regulariser: float = -1.0  # CQL regularisation for pretraining
+    cql_regulariser: float = -1.0  # CQL regularisation in training
+    cql_n_actions: int = 10  # Number of actions to sample for CQL
+    kl_regulariser: float = -1.0  # Critic KL regularisation in training
+    actor_LN: bool = True  # Use LayerNorm in actor
+    critic_LN: bool = True  # Use LayerNorm in critic
     # Wandb logging
-    project: str = "CORL"
+    project: str = "offline-RL-init"
     group: str = "TD3_BC-D4RL"
     name: str = "TD3_BC"
 
@@ -68,6 +77,14 @@ def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.nda
 
 def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
     return (states - mean) / std
+
+
+def discount_cumsum(x, discount):
+    disc_cumsum = np.zeros_like(x)
+    disc_cumsum[-1] = x[-1]
+    for t in reversed(range(x.shape[0] - 1)):
+        disc_cumsum[t] = x[t] + discount * disc_cumsum[t + 1]
+    return disc_cumsum
 
 
 def wrap_env(
@@ -98,6 +115,7 @@ class ReplayBuffer:
         state_dim: int,
         action_dim: int,
         buffer_size: int,
+        discount: float,
         device: str = "cpu",
     ):
         self._buffer_size = buffer_size
@@ -111,14 +129,43 @@ class ReplayBuffer:
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
         self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._returns_to_go = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._discount = discount
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
         return torch.tensor(data, dtype=torch.float32, device=self._device)
+
+    def compute_returns_to_go(self, data: np.ndarray) -> np.ndarray:
+        n_transitions = data["observations"].shape[0]
+        episode_rewards = []
+        returns_to_go = []
+
+        for i in range(n_transitions):
+            if data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1:
+                episode_rewards.append(data["rewards"][i])
+                episode_returns_to_go = discount_cumsum(
+                    np.array(episode_rewards), self._discount
+                )
+                returns_to_go.append(episode_returns_to_go)
+                episode_rewards = []
+            else:
+                episode_rewards.append(data["rewards"][i])
+        returns_to_go_array = np.array(
+            [
+                return_to_go
+                for episode_returns in returns_to_go
+                for return_to_go in episode_returns
+            ]
+        ).flatten()
+
+        return returns_to_go_array
 
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
@@ -129,13 +176,21 @@ class ReplayBuffer:
             raise ValueError(
                 "Replay buffer is smaller than the dataset you are trying to load!"
             )
+
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._dones[:n_transitions] = self._to_tensor(
+            (data["terminals"] + data["timeouts"])[..., None]
+        )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
+
+        data["returns_to_go"] = self.compute_returns_to_go(data)
+        self._returns_to_go[:n_transitions] = self._to_tensor(
+            data["returns_to_go"][..., None]
+        )
 
         print(f"Dataset size: {n_transitions}")
 
@@ -144,9 +199,10 @@ class ReplayBuffer:
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
+        returns_to_go = self._returns_to_go[indices]
         next_states = self._next_states[indices]
         dones = self._dones[indices]
-        return [states, actions, rewards, next_states, dones]
+        return [states, actions, rewards, returns_to_go, next_states, dones]
 
     def add_transition(self):
         # Use this method to add new data into the replay buffer during fine-tuning.
@@ -175,6 +231,7 @@ def wandb_init(config: dict) -> None:
         name=config["name"],
         id=str(uuid.uuid4()),
     )
+    wandb.run.log_code(".")
     wandb.run.save()
 
 
@@ -190,7 +247,15 @@ def eval_actor(
         episode_reward = 0.0
         while not done:
             action = actor.act(state, device)
-            state, reward, done, _ = env.step(action)
+            try:
+                state, reward, done, _ = env.step(action)
+            except Exception as e:
+                print(e)
+                print(
+                    "Error with mujoco! Evaluation episode terminated and return set to zero."
+                )
+                episode_reward = 0
+                break
             episode_reward += reward
         episode_rewards.append(episode_reward)
 
@@ -213,23 +278,30 @@ def return_reward_range(dataset, max_episode_steps):
     return min(returns), max(returns)
 
 
-def modify_reward(dataset, env_name, max_episode_steps=1000):
+def modify_reward(dataset, env_name):
     if any(s in env_name for s in ("halfcheetah", "hopper", "walker2d")):
-        min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
-        dataset["rewards"] /= max_ret - min_ret
-        dataset["rewards"] *= max_episode_steps
-    elif "antmaze" in env_name:
-        dataset["rewards"] -= 1.0
+        max_episode_steps = 1000
+    elif any(s in env_name for s in ("human", "cloned")):
+        max_episode_steps = 200
+    min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
+    dataset["rewards"] /= max_ret - min_ret
+    dataset["rewards"] *= max_episode_steps
+    # elif "antmaze" in env_name:
+    #     dataset["rewards"] -= 1.0
 
 
 class Actor(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, max_action: float):
+    def __init__(
+        self, state_dim: int, action_dim: int, max_action: float, actor_LN: bool = True
+    ):
         super(Actor, self).__init__()
 
         self.net = nn.Sequential(
             nn.Linear(state_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, action_dim),
             nn.Tanh(),
@@ -247,13 +319,15 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int):
+    def __init__(self, state_dim: int, action_dim: int, critic_LN: bool = True):
         super(Critic, self).__init__()
 
         self.net = nn.Sequential(
             nn.Linear(state_dim + action_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if critic_LN else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if critic_LN else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, 1),
         )
@@ -279,6 +353,12 @@ class TD3_BC:  # noqa
         noise_clip: float = 0.5,
         policy_freq: int = 2,
         alpha: float = 2.5,
+        pretrain_steps: int = 10000,
+        td_component: float = 0,
+        pretrain_cql_regulariser: float = 0,
+        cql_regulariser: float = 0,
+        cql_n_actions: int = 10,
+        kl_regulariser: float = 0,
         device: str = "cpu",
     ):
         self.actor = actor
@@ -299,14 +379,25 @@ class TD3_BC:  # noqa
         self.policy_freq = policy_freq
         self.alpha = alpha
 
+        if td_component > 0.0:
+            assert (
+                td_component <= 1.0
+            ), "TD_component_must be between 0 and 1 (default: 0)."
+        self.td_component = td_component
+        self.pretrain_cql_regulariser = pretrain_cql_regulariser
+        self.cql_regulariser = cql_regulariser
+        self.cql_n_actions = cql_n_actions
+        self.kl_regulariser = kl_regulariser
+
         self.total_it = 0
+        self.pretrain_steps = pretrain_steps
         self.device = device
 
     def train(self, batch: TensorBatch) -> Dict[str, float]:
         log_dict = {}
         self.total_it += 1
 
-        state, action, reward, next_state, done = batch
+        state, action, reward, return_to_go, next_state, done = batch
         not_done = 1 - done
 
         with torch.no_grad():
@@ -332,6 +423,42 @@ class TD3_BC:  # noqa
         # Compute critic loss
         critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
         log_dict["critic_loss"] = critic_loss.item()
+
+        if self.kl_regulariser > 0.0:
+            pretrain_q1 = self.pretrained_critic_1(state, action)
+            pretrain_q2 = self.pretrained_critic_2(state, action)
+            KL_regulariser = F.mse_loss(current_q1, pretrain_q1) + F.mse_loss(
+                current_q2, pretrain_q2
+            )  # Proportional to KL divergence between Gaussian critics with fixed standard deviation
+            log_dict["KL_regulariser"] = KL_regulariser.item()
+            critic_loss = (
+                critic_loss / critic_loss.detach()
+                + self.kl_regulariser * KL_regulariser / (KL_regulariser.detach() + 1e-6)
+            )
+
+        if self.cql_regulariser > 0.0:
+            # Compute CQL regularisation
+            random_actions = action.new_empty(
+                (self.cql_n_actions * action.shape[0], action.shape[1]),
+                requires_grad=False,
+            ).uniform_(-1, 1)
+            repeated_state = state.repeat(self.cql_n_actions, 1)
+            q1_random_values = self.critic_1(repeated_state, random_actions).reshape(
+                self.cql_n_actions, -1, 1
+            )
+            q2_random_values = self.critic_2(repeated_state, random_actions).reshape(
+                self.cql_n_actions, -1, 1
+            )
+
+            cql_regularisation = (
+                torch.logsumexp(q1_random_values, dim=0) - current_q1
+            ).mean() + (torch.logsumexp(q2_random_values, dim=0) - current_q2).mean()
+            log_dict["support_regulariser"] = cql_regularisation.item()
+            critic_loss = (
+                critic_loss / critic_loss.detach()
+                + self.cql_regulariser * cql_regularisation / cql_regularisation.detach()
+            )
+
         # Optimize the critic
         self.critic_1_optimizer.zero_grad()
         self.critic_2_optimizer.zero_grad()
@@ -341,7 +468,6 @@ class TD3_BC:  # noqa
 
         # Delayed actor updates
         if self.total_it % self.policy_freq == 0:
-
             # Compute actor loss
             pi = self.actor(state)
             q = self.critic_1(state, pi)
@@ -358,6 +484,108 @@ class TD3_BC:  # noqa
             soft_update(self.critic_1_target, self.critic_1, self.tau)
             soft_update(self.critic_2_target, self.critic_2, self.tau)
             soft_update(self.actor_target, self.actor, self.tau)
+
+        return log_dict
+
+    def pretrain_BC(self, batch: TensorBatch) -> Dict[str, float]:
+        log_dict = {}
+        self.total_it += 1
+
+        state, action, reward, return_to_go, next_state, done = batch
+        # Compute actor loss
+        pi = self.actor(state)
+        actor_loss = F.mse_loss(pi, action)
+        log_dict["actor_loss"] = actor_loss.item()
+        # Optimize the actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        return log_dict
+
+    def pretrain_actorcritic(self, batch: TensorBatch) -> Dict[str, float]:
+        log_dict = {}
+        self.total_it += 1
+
+        state, action, reward, return_to_go, next_state, done = batch
+        # Compute actor loss
+        pi = self.actor(state)
+        actor_loss = F.mse_loss(pi, action)
+        log_dict["actor_loss"] = actor_loss.item()
+        # Optimize the actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        # Compute critic loss
+        current_q1 = self.critic_1(state, action)
+        current_q2 = self.critic_2(state, action)
+
+        critic_loss = F.mse_loss(current_q1, return_to_go) + F.mse_loss(
+            current_q2, return_to_go
+        )
+        log_dict["critic_loss"] = critic_loss.item()
+
+        if self.td_component > 0.0:
+            with torch.no_grad():
+                # Select action according to actor and add clipped noise
+                noise = (torch.randn_like(action) * self.policy_noise).clamp(
+                    -self.noise_clip, self.noise_clip
+                )
+
+                next_action = (self.actor_target(next_state) + noise).clamp(
+                    -self.max_action, self.max_action
+                )
+
+                #     # Compute the target Q value
+                target_q1 = self.critic_1_target(next_state, next_action)
+                target_q2 = self.critic_2_target(next_state, next_action)
+                target_q = torch.min(target_q1, target_q2)
+                target_q = reward + (1 - done) * self.discount * target_q
+
+            TD_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
+            log_dict["TD_loss"] = TD_loss.item()
+            critic_loss = (
+                1 - self.td_component
+            ) * critic_loss / critic_loss.detach() + self.td_component * TD_loss / TD_loss.detach()
+
+        if self.pretrain_cql_regulariser > 0.0:
+            # Compute regularisation
+            random_actions = action.new_empty(
+                (self.cql_n_actions * action.shape[0], action.shape[1]),
+                requires_grad=False,
+            ).uniform_(-1, 1)
+            repeated_state = state.repeat(self.cql_n_actions, 1)
+            q1_policy_values = self.critic_1(repeated_state, random_actions).reshape(
+                self.cql_n_actions, -1, 1
+            )
+            q2_policy_values = self.critic_2(repeated_state, random_actions).reshape(
+                self.cql_n_actions, -1, 1
+            )
+
+            cql_regulariser = (
+                torch.logsumexp(q1_policy_values, dim=0) - current_q1
+            ).mean() + (torch.logsumexp(q2_policy_values, dim=0) - current_q2).mean()
+            log_dict["support_regulariser"] = cql_regulariser.item()
+
+            critic_loss = (
+                critic_loss / critic_loss.detach()
+                + self.pretrain_cql_regulariser
+                * cql_regulariser
+                / cql_regulariser.detach()
+            )
+
+        # Optimize the critic
+        self.critic_1_optimizer.zero_grad()
+        self.critic_2_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_1_optimizer.step()
+        self.critic_2_optimizer.step()
+
+        # Update the frozen target models
+        soft_update(self.critic_1_target, self.critic_1, self.tau)
+        soft_update(self.critic_2_target, self.critic_2, self.tau)
+        soft_update(self.actor_target, self.actor, self.tau)
 
         return log_dict
 
@@ -395,7 +623,7 @@ def train(config: TrainConfig):
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    dataset = d4rl.qlearning_dataset(env)
+    dataset = env.get_dataset()
 
     if config.normalize_reward:
         modify_reward(dataset, config.env)
@@ -408,6 +636,13 @@ def train(config: TrainConfig):
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
     )
+
+    if "next_observations" not in dataset.keys():
+        dataset["next_observations"] = np.roll(
+            dataset["observations"], shift=-1, axis=0
+        )  # Terminals/timeouts block next observations
+        print("Loaded next state observations from current state observations.")
+
     dataset["next_observations"] = normalize_states(
         dataset["next_observations"], state_mean, state_std
     )
@@ -416,6 +651,7 @@ def train(config: TrainConfig):
         state_dim,
         action_dim,
         config.buffer_size,
+        config.discount,
         config.device,
     )
     replay_buffer.load_d4rl_dataset(dataset)
@@ -432,12 +668,12 @@ def train(config: TrainConfig):
     seed = config.seed
     set_seed(seed, env)
 
-    actor = Actor(state_dim, action_dim, max_action).to(config.device)
+    actor = Actor(state_dim, action_dim, max_action, config.actor_LN).to(config.device)
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=3e-4)
 
-    critic_1 = Critic(state_dim, action_dim).to(config.device)
+    critic_1 = Critic(state_dim, action_dim, config.critic_LN).to(config.device)
     critic_1_optimizer = torch.optim.Adam(critic_1.parameters(), lr=3e-4)
-    critic_2 = Critic(state_dim, action_dim).to(config.device)
+    critic_2 = Critic(state_dim, action_dim, config.critic_LN).to(config.device)
     critic_2_optimizer = torch.optim.Adam(critic_2.parameters(), lr=3e-4)
 
     kwargs = {
@@ -457,6 +693,13 @@ def train(config: TrainConfig):
         "policy_freq": config.policy_freq,
         # TD3 + BC
         "alpha": config.alpha,
+        "pretrain_steps": config.pretrain_steps,
+        # Regularisation
+        "td_component": config.td_component,
+        "pretrain_cql_regulariser": config.pretrain_cql_regulariser,
+        "cql_regulariser": config.cql_regulariser,
+        "cql_n_actions": config.cql_n_actions,
+        "kl_regulariser": config.kl_regulariser,
     }
 
     print("---------------------------------------")
@@ -477,7 +720,24 @@ def train(config: TrainConfig):
     for t in range(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
-        log_dict = trainer.train(batch)
+        if config.pretrain is not None:
+            if t < config.pretrain_steps:
+                if config.pretrain == "BC":
+                    log_dict = trainer.pretrain_BC(batch)
+                elif config.pretrain == "AC":
+                    log_dict = trainer.pretrain_actorcritic(batch)
+                elif config.pretrain == "C":
+                    log_dict = trainer.pretrain_critic(batch)
+                else:
+                    raise ValueError(f"Pretrain type {config.pretrain} not recognised.")
+            else:
+                if t == config.pretrain_steps:
+                    with torch.no_grad():
+                        trainer.pretrained_critic_1 = copy.deepcopy(trainer.critic_1)
+                        trainer.pretrained_critic_2 = copy.deepcopy(trainer.critic_2)
+                log_dict = trainer.train(batch)
+        else:
+            log_dict = trainer.train(batch)
         wandb.log(log_dict, step=trainer.total_it)
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
@@ -498,14 +758,36 @@ def train(config: TrainConfig):
                 f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
             )
             print("---------------------------------------")
-            torch.save(
-                trainer.state_dict(),
-                os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
-            )
+            if config.checkpoints_path is not None:
+                torch.save(
+                    trainer.state_dict(),
+                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                )
             wandb.log(
                 {"d4rl_normalized_score": normalized_eval_score},
                 step=trainer.total_it,
             )
+
+    # testing
+    test_returns = eval_actor(
+        env=env,
+        actor=actor,
+        device=config.device,
+        n_episodes=100,
+        seed=config.seed,
+    )
+    test_log = {
+        "test/reward_mean": np.mean(test_returns),
+        "test/reward_std": np.std(test_returns),
+    }
+    if hasattr(env, "get_normalized_score"):
+        normalized_score = env.get_normalized_score(test_returns) * 100.0
+        test_log["test/normalized_score_mean"] = np.mean(normalized_score)
+        test_log["test/normalized_score_std"] = np.std(normalized_score)
+
+    wandb.log(test_log)
+
+    wandb.finish()
 
 
 if __name__ == "__main__":

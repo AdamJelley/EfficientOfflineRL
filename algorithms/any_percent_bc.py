@@ -12,6 +12,7 @@ import pyrallis
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal
 import wandb
 
 TensorBatch = List[torch.Tensor]
@@ -35,8 +36,10 @@ class TrainConfig:
     frac: float = 0.1  # Best data fraction to use
     max_traj_len: int = 1000  # Max trajectory length
     normalize: bool = True  # Normalize states
+    actor_LN: bool = True  # Use LayerNorm for actor
+    soft: bool = False  # Use soft BC
     # Wandb logging
-    project: str = "CORL"
+    project: str = "offline-RL-init"
     group: str = "BC-D4RL"
     name: str = "BC"
 
@@ -227,27 +230,73 @@ def keep_best_trajectories(
 
 
 class Actor(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, max_action: float):
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        max_action: float,
+        actor_LN: bool = True,
+        soft: bool = True,
+    ):
         super(Actor, self).__init__()
+        self.action_dim = action_dim
+        self.soft = soft
 
         self.net = nn.Sequential(
             nn.Linear(state_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
             nn.ReLU(),
-            nn.Linear(256, action_dim),
-            nn.Tanh(),
+            # nn.Linear(256, action_dim),
+            # nn.Tanh(),
         )
+        self.mu = nn.Linear(256, action_dim)
+        self.log_sigma = nn.Linear(256, action_dim)
 
         self.max_action = max_action
 
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.max_action * self.net(state)
+    def forward(self, state: torch.Tensor, deterministic=False) -> torch.Tensor:
+        if self.soft:
+            hidden = self.net(state)
+            mu = self.mu(hidden)
+            if deterministic:
+                scaled_action = self.max_action * torch.tanh(mu)
+                log_prob = None
+            else:
+                log_sigma = self.log_sigma(hidden)
+                log_sigma = torch.clip(log_sigma, -5, 2)
+                policy_dist = Normal(mu, torch.exp(log_sigma))
+                action = policy_dist.rsample()
+                tanh_action = torch.tanh(action)
+                # change of variables formula (SAC paper, appendix C, eq 21)
+                log_prob = policy_dist.log_prob(action).sum(axis=-1)
+                log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(
+                    axis=-1
+                )
+                scaled_action = self.max_action * tanh_action
+        else:
+            hidden = self.net(state)
+            scaled_action = torch.tanh(self.mu(hidden))
+            log_prob = None
+        return scaled_action, log_prob
+
+    def log_prob(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        hidden = self.net(state)
+        mu = self.mu(hidden)
+        log_sigma = self.log_sigma(hidden)
+        log_sigma = torch.clip(log_sigma, -5, 2)
+        policy_dist = Normal(mu, torch.exp(log_sigma))
+        action = torch.clip(action, -self.max_action + 1e-6, self.max_action - 1e-6)
+        log_prob = policy_dist.log_prob(torch.arctanh(action)).sum(axis=-1)
+        log_prob = log_prob - torch.log(1 - action.pow(2) + 1e-6).sum(axis=-1)
+        return log_prob
 
     @torch.no_grad()
     def act(self, state: np.ndarray, device: str = "cpu") -> np.ndarray:
         state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
-        return self(state).cpu().data.numpy().flatten()
+        return self(state, deterministic=True)[0].cpu().data.numpy().flatten()
 
 
 class BC:  # noqa
@@ -257,15 +306,31 @@ class BC:  # noqa
         actor: nn.Module,
         actor_optimizer: torch.optim.Optimizer,
         discount: float = 0.99,
+        soft: bool = False,
         device: str = "cpu",
     ):
         self.actor = actor
         self.actor_optimizer = actor_optimizer
         self.max_action = max_action
         self.discount = discount
+        self.soft = soft
 
         self.total_it = 0
         self.device = device
+        self.log_alpha = torch.tensor(
+            [0.0], dtype=torch.float32, device=self.device, requires_grad=True
+        )
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-4)
+        self.alpha = self.log_alpha.exp().detach()
+        self.target_entropy = -float(self.actor.action_dim)
+
+    def _alpha_loss(self, state: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            action, action_log_prob = self.actor(state)
+
+        loss = (-self.log_alpha * (action_log_prob + self.target_entropy)).mean()
+
+        return loss
 
     def train(self, batch: TensorBatch) -> Dict[str, float]:
         log_dict = {}
@@ -274,8 +339,20 @@ class BC:  # noqa
         state, action, _, _, _ = batch
 
         # Compute actor loss
-        pi = self.actor(state)
-        actor_loss = F.mse_loss(pi, action)
+        if self.soft:
+            alpha_loss = self._alpha_loss(state)
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
+            self.alpha = self.log_alpha.exp().detach()
+
+            # Compute actor loss
+            pi, log_pi = self.actor(state)
+            log_prob_action = self.actor.log_prob(state, action)
+            actor_loss = (self.alpha * log_pi - log_prob_action).mean()
+        else:
+            pi, _ = self.actor(state)
+            actor_loss = F.mse_loss(pi, action)
         log_dict["actor_loss"] = actor_loss.item()
         # Optimize the actor
         self.actor_optimizer.zero_grad()
@@ -304,14 +381,21 @@ def train(config: TrainConfig):
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    dataset = d4rl.qlearning_dataset(env)
+    dataset = env.get_dataset()
 
-    keep_best_trajectories(dataset, config.frac, config.discount)
+    if config.frac != 1.0:
+        keep_best_trajectories(dataset, config.frac, config.discount)
 
     if config.normalize:
         state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-3)
     else:
         state_mean, state_std = 0, 1
+
+    if "next_observations" not in dataset.keys():
+        dataset["next_observations"] = np.roll(
+            dataset["observations"], shift=-1, axis=0
+        )  # Terminals/timeouts block next observations
+        print("Loaded next state observations from current state observations.")
 
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
@@ -340,7 +424,9 @@ def train(config: TrainConfig):
     seed = config.seed
     set_seed(seed, env)
 
-    actor = Actor(state_dim, action_dim, max_action).to(config.device)
+    actor = Actor(state_dim, action_dim, max_action, config.actor_LN, config.soft).to(
+        config.device
+    )
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=3e-4)
 
     kwargs = {
@@ -348,6 +434,7 @@ def train(config: TrainConfig):
         "actor": actor,
         "actor_optimizer": actor_optimizer,
         "discount": config.discount,
+        "soft": config.soft,
         "device": config.device,
     }
 
@@ -390,10 +477,11 @@ def train(config: TrainConfig):
                 f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
             )
             print("---------------------------------------")
-            torch.save(
-                trainer.state_dict(),
-                os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
-            )
+            if config.checkpoints_path is not None:
+                torch.save(
+                    trainer.state_dict(),
+                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                )
             wandb.log(
                 {"d4rl_normalized_score": normalized_eval_score},
                 step=trainer.total_it,
