@@ -62,6 +62,7 @@ class TrainConfig:
     percentage_pretrain_BC: float = 0.5
     td_component: float = -1.0
     bc_regulariser: float = -1.0
+    soft_bc_regulariser: float = -1.0
     pretrain_cql_regulariser: float = -1.0
     cql_regulariser: float = -1.0
     cql_n_actions: int = 10
@@ -510,6 +511,7 @@ class EDAC:
         # pretrain_eta: float = 1.0,
         alpha_learning_rate: float = 1e-4,
         bc_regulariser: float = -1.0,
+        soft_bc_regulariser: float = -1.0,
         td_component: float = -1.0,
         pretrain_cql_regulariser: float = -1.0,
         cql_regulariser: float = -1.0,
@@ -533,7 +535,12 @@ class EDAC:
         self.eta = eta
         # self.pretrain_eta = eta
 
+        if bc_regulariser > 0.0:
+            assert (
+                soft_bc_regulariser <= 0.0
+            ), "Only consider either hard or soft BC regularisation. Here bc_regulariser and soft_bc_regulariser > 0."
         self.bc_regulariser = bc_regulariser
+        self.soft_bc_regulariser = soft_bc_regulariser
         if td_component > 0.0:
             assert (
                 td_component <= 1.0
@@ -582,38 +589,35 @@ class EDAC:
 
         assert log_pi.shape == q_value_min.shape
         if self.bc_regulariser > 0.0:
-            # bc_loss = (self.alpha * log_pi - log_prob_action).mean()
-            # loss = (self.bc_regulariser * bc_loss / bc_loss) - (
-            #     q_value_min.mean() / q_value_min.mean().detach()
-            # )
-            # loss = (self.alpha * log_pi - q_value_min).mean()
-            # loss = loss / loss.detach() - self.bc_regulariser * log_prob_action.mean()
             bc_loss = F.mse_loss(pi, action)
             loss = (self.alpha * log_pi - q_value_min).mean()
             loss = (
                 loss / loss.detach() + self.bc_regulariser * bc_loss / bc_loss.detach()
             )
+        elif self.soft_bc_regulariser > 0.0:
+            bc_loss = (self.alpha * log_pi - log_prob_action).mean()
+            loss = (self.soft_bc_regulariser * bc_loss / bc_loss) - (
+                q_value_min.mean() / q_value_min.mean().detach()
+            )
+            loss = (self.alpha * log_pi - q_value_min).mean()
+            loss = (
+                loss / loss.detach() - self.soft_bc_regulariser * log_prob_action.mean()
+            )
         else:
             loss = (self.alpha * log_pi - q_value_min).mean()
 
         if self.actor_kl_regulariser > 0.0:
-            pretrained_action, _ = self.pretrained_actor(state, deterministic=True)
-
-            KL_regulariser = F.mse_loss(pi, pretrained_action.detach())
+            (
+                pretrained_action,
+                pretrained_log_prob,
+                pretrained_policy_dist,
+            ) = self.pretrained_actor(state, need_policy_dist=True)
+            KL_regulariser = torch.distributions.kl.kl_divergence(
+                policy_dist, pretrained_policy_dist
+            ).mean()
             loss = loss / loss.detach() + self.actor_kl_regulariser * KL_regulariser / (
                 KL_regulariser.detach() + 1e-6
             )
-            # (
-            #     pretrained_action,
-            #     pretrained_log_prob,
-            #     pretrained_policy_dist,
-            # ) = self.pretrained_actor(state, need_policy_dist=True)
-            # KL_regulariser = torch.distributions.kl.kl_divergence(
-            #     policy_dist, pretrained_policy_dist
-            # ).mean()
-            # loss = loss / loss.detach() + self.actor_kl_regulariser * KL_regulariser / (
-            #     KL_regulariser.detach() + 1e-6
-            # )
 
         return loss, batch_entropy, q_value_std
 
