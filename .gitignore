@@ -7,7 +7,6 @@ wandb
 videos
 *.pkl
 *.txt
-plotting
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
