@@ -281,13 +281,13 @@ def return_reward_range(dataset, max_episode_steps):
 def modify_reward(dataset, env_name):
     if any(s in env_name for s in ("halfcheetah", "hopper", "walker2d")):
         max_episode_steps = 1000
-    elif any(s in env_name for s in ("human", "cloned")):
-        max_episode_steps = 200
-    min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
-    dataset["rewards"] /= max_ret - min_ret
-    dataset["rewards"] *= max_episode_steps
-    # elif "antmaze" in env_name:
-    #     dataset["rewards"] -= 1.0
+    # elif any(s in env_name for s in ("human", "cloned")):
+    #     max_episode_steps = 200
+        min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
+        dataset["rewards"] /= max_ret - min_ret
+        dataset["rewards"] *= max_episode_steps
+    elif "antmaze" in env_name:
+        dataset["rewards"] -= 1.0
 
 
 class Actor(nn.Module):
