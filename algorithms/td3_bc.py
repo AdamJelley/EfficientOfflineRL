@@ -146,7 +146,10 @@ class ReplayBuffer:
         n_transitions = data["observations"].shape[0]
         episode_rewards = []
         returns_to_go = []
+        episode_timesteps = []
+        timesteps = []
 
+        timestep = 0
         for i in range(n_transitions):
             if data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1:
                 episode_rewards.append(data["rewards"][i])
@@ -155,8 +158,15 @@ class ReplayBuffer:
                 )
                 returns_to_go.append(episode_returns_to_go)
                 episode_rewards = []
+
+                episode_timesteps.append(timestep)
+                timesteps.append(episode_timesteps)
+                episode_timesteps = []
+                timestep = 0
             else:
                 episode_rewards.append(data["rewards"][i])
+                episode_timesteps.append(timestep)
+                timestep += 1
         returns_to_go_array = np.array(
             [
                 return_to_go
@@ -164,8 +174,15 @@ class ReplayBuffer:
                 for return_to_go in episode_returns
             ]
         ).flatten()
+        timesteps_array = np.array(
+            [
+                timestep
+                for episode_timesteps in timesteps
+                for timestep in episode_timesteps
+            ]
+        ).flatten()
 
-        return returns_to_go_array
+        return returns_to_go_array, timesteps_array
 
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
@@ -177,20 +194,24 @@ class ReplayBuffer:
                 "Replay buffer is smaller than the dataset you are trying to load!"
             )
 
-        self._states[:n_transitions] = self._to_tensor(data["observations"])
+        #self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
-        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
+        #self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         self._dones[:n_transitions] = self._to_tensor(
             (data["terminals"] + data["timeouts"])[..., None]
         )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
-        data["returns_to_go"] = self.compute_returns_to_go(data)
+        data["returns_to_go"], data["timesteps"] = self.compute_returns_to_go(data)
         self._returns_to_go[:n_transitions] = self._to_tensor(
             data["returns_to_go"][..., None]
         )
+        data["states"] = np.concatenate((data["observations"], data["timesteps"][..., None]), axis=1)
+        data["next_states"] = np.concatenate((data["next_observations"], data["timesteps"][..., None]+1), axis=1)
+        self._states = self._to_tensor(data["states"])
+        self._next_states = self._to_tensor(data["next_states"])
 
         print(f"Dataset size: {n_transitions}")
 
@@ -245,10 +266,14 @@ def eval_actor(
     for _ in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
+        timestep = 0
+        state = np.append(state, timestep)
         while not done:
             action = actor.act(state, device)
             try:
                 state, reward, done, _ = env.step(action)
+                timestep += 1
+                state = np.append(state, timestep)
             except Exception as e:
                 print(e)
                 print(
@@ -620,7 +645,7 @@ class TD3_BC:  # noqa
 def train(config: TrainConfig):
     env = gym.make(config.env)
 
-    state_dim = env.observation_space.shape[0]
+    state_dim = env.observation_space.shape[0] + 1 # Add timestep
     action_dim = env.action_space.shape[0]
 
     dataset = env.get_dataset()
