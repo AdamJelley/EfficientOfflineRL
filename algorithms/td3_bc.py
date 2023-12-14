@@ -44,6 +44,7 @@ class TrainConfig:
     alpha: float = 2.5  # Coefficient for Q function in actor loss
     normalize: bool = True  # Normalize states
     normalize_reward: bool = False  # Normalize reward
+    use_timestep: bool = False  # Add timestep to state
     pretrain: Optional[str] = None  # BC or AC
     pretrain_steps: int = 10000  # Number of pretraining steps
     td_component: float = -1.0  # Proportion of TD to use (rather than MC) in pretraining
@@ -116,6 +117,7 @@ class ReplayBuffer:
         action_dim: int,
         buffer_size: int,
         discount: float,
+        use_timestep: bool,
         device: str = "cpu",
     ):
         self._buffer_size = buffer_size
@@ -137,6 +139,7 @@ class ReplayBuffer:
         )
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._discount = discount
+        self._use_timestep = use_timestep
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
@@ -159,13 +162,13 @@ class ReplayBuffer:
                 returns_to_go.append(episode_returns_to_go)
                 episode_rewards = []
 
-                episode_timesteps.append(timestep)
+                episode_timesteps.append(timestep/1000.0)
                 timesteps.append(episode_timesteps)
                 episode_timesteps = []
                 timestep = 0
             else:
                 episode_rewards.append(data["rewards"][i])
-                episode_timesteps.append(timestep)
+                episode_timesteps.append(timestep/1000.0)
                 timestep += 1
         returns_to_go_array = np.array(
             [
@@ -194,10 +197,8 @@ class ReplayBuffer:
                 "Replay buffer is smaller than the dataset you are trying to load!"
             )
 
-        #self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
-        #self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         self._dones[:n_transitions] = self._to_tensor(
             (data["terminals"] + data["timeouts"])[..., None]
         )
@@ -208,10 +209,14 @@ class ReplayBuffer:
         self._returns_to_go[:n_transitions] = self._to_tensor(
             data["returns_to_go"][..., None]
         )
-        data["states"] = np.concatenate((data["observations"], data["timesteps"][..., None]), axis=1)
-        data["next_states"] = np.concatenate((data["next_observations"], data["timesteps"][..., None]+1), axis=1)
-        self._states = self._to_tensor(data["states"])
-        self._next_states = self._to_tensor(data["next_states"])
+        if self._use_timestep:
+            data["states"] = np.concatenate((data["observations"], data["timesteps"][..., None]), axis=1)
+            data["next_states"] = np.concatenate((data["next_observations"], data["timesteps"][..., None]+1), axis=1)
+            self._states = self._to_tensor(data["states"])
+            self._next_states = self._to_tensor(data["next_states"])
+        else:
+            self._states[:n_transitions] = self._to_tensor(data["observations"])
+            self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
 
         print(f"Dataset size: {n_transitions}")
 
@@ -258,7 +263,7 @@ def wandb_init(config: dict) -> None:
 
 @torch.no_grad()
 def eval_actor(
-    env: gym.Env, actor: nn.Module, device: str, n_episodes: int, seed: int
+    env: gym.Env, actor: nn.Module, device: str, n_episodes: int, use_timestep: bool, seed: int
 ) -> np.ndarray:
     env.seed(seed)
     actor.eval()
@@ -267,13 +272,13 @@ def eval_actor(
         state, done = env.reset(), False
         episode_reward = 0.0
         timestep = 0
-        state = np.append(state, timestep)
+        state = np.append(state, timestep/1000.0) if use_timestep else state
         while not done:
             action = actor.act(state, device)
             try:
                 state, reward, done, _ = env.step(action)
                 timestep += 1
-                state = np.append(state, timestep)
+                state = np.append(state, timestep/1000.0) if use_timestep else state
             except Exception as e:
                 print(e)
                 print(
@@ -645,7 +650,7 @@ class TD3_BC:  # noqa
 def train(config: TrainConfig):
     env = gym.make(config.env)
 
-    state_dim = env.observation_space.shape[0] + 1 # Add timestep
+    state_dim = env.observation_space.shape[0] + 1 if config.use_timestep else env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
     dataset = env.get_dataset()
@@ -677,6 +682,7 @@ def train(config: TrainConfig):
         action_dim,
         config.buffer_size,
         config.discount,
+        config.use_timestep,
         config.device,
     )
     replay_buffer.load_d4rl_dataset(dataset)
@@ -772,6 +778,7 @@ def train(config: TrainConfig):
                 actor,
                 device=config.device,
                 n_episodes=config.n_episodes,
+                use_timestep=config.use_timestep,
                 seed=config.seed,
             )
             eval_score = eval_scores.mean()
@@ -799,6 +806,7 @@ def train(config: TrainConfig):
         actor=actor,
         device=config.device,
         n_episodes=100,
+        use_timestep=config.use_timestep,
         seed=config.seed,
     )
     test_log = {
