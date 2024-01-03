@@ -211,7 +211,7 @@ class ReplayBuffer:
         )
         if self._use_timestep:
             data["states"] = np.concatenate((data["observations"], data["timesteps"][..., None]), axis=1)
-            data["next_states"] = np.concatenate((data["next_observations"], data["timesteps"][..., None]+1), axis=1)
+            data["next_states"] = np.concatenate((data["next_observations"], data["timesteps"][..., None]+0.001), axis=1)
             self._states = self._to_tensor(data["states"])
             self._next_states = self._to_tensor(data["next_states"])
         else:
