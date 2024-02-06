@@ -668,6 +668,7 @@ class EDAC:
         action: torch.Tensor,
         reward: torch.Tensor,
         next_state: torch.Tensor,
+        return_to_go: torch.Tensor,
         done: torch.Tensor,
     ) -> torch.Tensor:
         with torch.no_grad():
@@ -679,6 +680,7 @@ class EDAC:
 
             assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
             q_target = reward + self.gamma * (1 - done) * q_next.unsqueeze(-1)
+            #q_target = torch.max(return_to_go, q_target)
 
         q_values = self.critic(state, action)
 
@@ -853,7 +855,7 @@ class EDAC:
         self.actor_optimizer.step()
 
         # Critic update
-        critic_loss = self._critic_loss(state, action, reward, next_state, done)
+        critic_loss = self._critic_loss(state, action, reward, next_state, return_to_go, done)
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
