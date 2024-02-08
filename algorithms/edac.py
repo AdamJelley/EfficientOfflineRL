@@ -191,6 +191,7 @@ class ReplayBuffer:
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
+        self._timeouts = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._discount = discount
         self._batch_size = batch_size
@@ -230,34 +231,47 @@ class ReplayBuffer:
         episode_rewards = []
         episode_entropy_bonuses = []
         soft_returns_to_go = []
+        # import time
+        # start=time.time()
+        # print(f'Start: {start-start}')
 
+        return_batch_size = 10 * self._batch_size # Speeds up computation of entropy for each state, action pair
         with torch.no_grad():
-            for i in range((n_transitions // self._batch_size) + 1):
+            for i in range((n_transitions // return_batch_size) + 1):
                 batch_states = self._states[
-                    self._batch_size * i : min(self._batch_size * (i + 1), n_transitions)
+                    return_batch_size * i : min(return_batch_size * (i + 1), n_transitions)
                 ]
                 pi, log_pi = actor(
                     batch_states,
                     need_log_prob=True,
                 )
                 self._entropy_bonuses[
-                    self._batch_size * i : min(self._batch_size * (i + 1), n_transitions)
+                    return_batch_size * i : min(return_batch_size * (i + 1), n_transitions)
                 ] = -log_pi.detach().unsqueeze(-1)
+            
+        # mid=time.time()
+        # print(f'Mid: {mid-start}')
 
         for i in range(n_transitions):
             episode_rewards.append(self._rewards[i].item())
             episode_entropy_bonuses.append(self._entropy_bonuses[i].item())
             if self._dones[i] or i == n_transitions - 1:
+                if self._timeouts[i] or i == n_transitions - 1:
+                    episode_rewards[-1] = episode_rewards[-1]/(1 - self._discount)
+                    episode_entropy_bonuses[-1] = episode_entropy_bonuses[-1]/(1 - self._discount)
                 episode_returns_to_go = discount_cumsum(
-                    self._to_tensor(episode_rewards), self._discount
+                    np.array(episode_rewards), self._discount
                 ) + alpha.detach().item() * discount_cumsum(
-                    self._to_tensor(episode_entropy_bonuses),
+                    np.array(episode_entropy_bonuses),
                     self._discount,
                     include_first=False,
                 )
+                #episode_returns_to_go = self._to_tensor(episode_returns_to_go)
                 soft_returns_to_go.append(episode_returns_to_go)
                 episode_rewards = []
                 episode_entropy_bonuses = []
+        # end=time.time()
+        # print(f'End: {end-start}')
 
         self._soft_returns_to_go[:n_transitions] = (
             self._to_tensor(
@@ -287,6 +301,7 @@ class ReplayBuffer:
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
 
+        self._timeouts[:n_transitions] = self._to_tensor(data["timeouts"][..., None])
         self._dones[:n_transitions] = self._to_tensor(
             (data["terminals"] + data["timeouts"])[..., None]
         )
@@ -923,9 +938,11 @@ def eval_actor(
     for i in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
+        timestep=0
         while not done:
             action = actor.act(state, device)
             state, reward, done, _ = env.step(action)
+            timestep+=1
             episode_reward += reward
             if video is not None and i == 0:  # Record 1 episode
                 video.record(env)

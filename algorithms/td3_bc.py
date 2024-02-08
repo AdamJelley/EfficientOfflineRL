@@ -148,15 +148,15 @@ class ReplayBuffer:
         returns_to_go = []
 
         for i in range(n_transitions):
+            episode_rewards.append(data["rewards"][i])
             if data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1:
-                episode_rewards.append(data["rewards"][i])
+                if data["timeouts"][i] or i == n_transitions - 1:
+                    episode_rewards[-1] = episode_rewards[-1]/(1-self._discount)
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
                 )
                 returns_to_go.append(episode_returns_to_go)
                 episode_rewards = []
-            else:
-                episode_rewards.append(data["rewards"][i])
         returns_to_go_array = np.array(
             [
                 return_to_go
@@ -245,10 +245,12 @@ def eval_actor(
     for _ in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
+        timestep = 0
         while not done:
             action = actor.act(state, device)
             try:
                 state, reward, done, _ = env.step(action)
+                timestep+=1
             except Exception as e:
                 print(e)
                 print(
@@ -526,6 +528,8 @@ class TD3_BC:  # noqa
         )
         log_dict["critic_loss"] = critic_loss.item()
 
+        # self.td_component = self.total_it / self.pretrain_steps
+        # log_dict["td_component"] = self.td_component
         if self.td_component > 0.0:
             with torch.no_grad():
                 # Select action according to actor and add clipped noise
