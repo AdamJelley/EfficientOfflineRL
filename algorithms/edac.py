@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 import math
 import os
+from pathlib import Path
 import random
 import uuid
 
@@ -52,6 +53,7 @@ class TrainConfig:
     eval_every: int = 5
     # general params
     checkpoints_path: Optional[str] = None
+    load_model: Optional[str] = None
     deterministic_torch: bool = False
     train_seed: int = 10
     eval_seed: int = 42
@@ -1035,6 +1037,13 @@ def train(config: TrainConfig):
         actor_kl_regulariser=config.actor_kl_regulariser,
         device=config.device,
     )
+    
+    # Load checkpoint
+    if config.load_model != None:
+        policy_file = Path(config.load_model)
+        trainer.load_state_dict(torch.load(policy_file))
+        actor = trainer.actor
+        
     # saving config to the checkpoint
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
