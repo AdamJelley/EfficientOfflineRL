@@ -8,6 +8,7 @@ videos
 *.pkl
 *.txt
 plotting
+.vscode
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
