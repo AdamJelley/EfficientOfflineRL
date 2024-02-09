@@ -489,6 +489,82 @@ class TD3_BC:  # noqa
 
         return log_dict
 
+    def new_train(self, batch: TensorBatch) -> Dict[str, float]:
+        log_dict = {}
+        self.total_it += 1
+
+        state, action, reward, return_to_go, next_state, done = batch
+        not_done = 1 - done
+
+        with torch.no_grad():
+            # Select action according to actor and add clipped noise
+            noise = (torch.randn_like(action) * self.policy_noise).clamp(
+                -self.noise_clip, self.noise_clip
+            )
+
+            next_action = (self.actor_target(next_state) + noise).clamp(
+                -self.max_action, self.max_action
+            )
+
+            # Compute the target Q value
+            target_q1 = self.critic_1_target(next_state, next_action)
+            target_q2 = self.critic_2_target(next_state, next_action)
+            target_q = torch.min(target_q1, target_q2)
+            target_q = reward + not_done * self.discount * target_q
+
+        # Get current Q estimates
+        current_q1 = self.critic_1(state, action)
+        current_q2 = self.critic_2(state, action)
+
+        # Compute MC augmented target
+        new_target = torch.max(target_q, return_to_go)
+        bc_mask = (return_to_go > target_q).squeeze(-1)
+
+        # Compute critic loss
+        critic_loss = F.mse_loss(current_q1, new_target) + F.mse_loss(current_q2, new_target)
+        log_dict["critic_loss"] = critic_loss.item()
+
+        # Optimize the critic
+        self.critic_1_optimizer.zero_grad()
+        self.critic_2_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_1_optimizer.step()
+        self.critic_2_optimizer.step()
+
+        # Delayed actor updates
+        if self.total_it % self.policy_freq == 0:
+            pi = self.actor(state)
+            
+            bc_state = state[bc_mask]
+            bc_action = action[bc_mask]
+            bc_pi = pi[bc_mask]
+            
+            rl_state = state[~bc_mask]
+            rl_action = action[~bc_mask]
+            rl_pi = pi[~bc_mask]
+            # Compute BC actor loss
+            bc_actor_loss = F.mse_loss(bc_pi, bc_action)
+            
+            # Compute PG actor loss
+            q = self.critic_1(rl_state, rl_pi)
+            lmbda = self.alpha / q.abs().mean().detach()
+
+            rl_actor_loss = -lmbda * q.mean() + F.mse_loss(rl_pi, rl_action)
+            
+            actor_loss = bc_actor_loss + rl_actor_loss
+            log_dict["actor_loss"] = actor_loss.item()
+            # Optimize the actor
+            self.actor_optimizer.zero_grad()
+            actor_loss.backward()
+            self.actor_optimizer.step()
+
+            # Update the frozen target models
+            soft_update(self.critic_1_target, self.critic_1, self.tau)
+            soft_update(self.critic_2_target, self.critic_2, self.tau)
+            soft_update(self.actor_target, self.actor, self.tau)
+
+        return log_dict
+
     def pretrain_BC(self, batch: TensorBatch) -> Dict[str, float]:
         log_dict = {}
         self.total_it += 1
@@ -732,6 +808,8 @@ def train(config: TrainConfig):
                     log_dict = trainer.pretrain_actorcritic(batch)
                 elif config.pretrain == "C":
                     log_dict = trainer.pretrain_critic(batch)
+                elif config.pretrain == "newAC":
+                    log_dict = trainer.new_train(batch)
                 else:
                     raise ValueError(f"Pretrain type {config.pretrain} not recognised.")
             else:
