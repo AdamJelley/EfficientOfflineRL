@@ -319,6 +319,9 @@ class Actor(nn.Module):
             nn.Linear(256, 256),
             nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
             nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
+            nn.ReLU(),
             nn.Linear(256, action_dim),
             nn.Tanh(),
         )
