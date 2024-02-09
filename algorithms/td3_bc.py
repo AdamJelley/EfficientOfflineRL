@@ -338,6 +338,22 @@ class Critic(nn.Module):
         sa = torch.cat([state, action], 1)
         return self.net(sa)
 
+class Value(nn.Module):
+    def __init__(self, state_dim: int, critic_LN: bool = True):
+        super(Value, self).__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if critic_LN else nn.Identity(),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256, elementwise_affine=False) if critic_LN else nn.Identity(),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.net(state)
 
 class TD3_BC:  # noqa
     def __init__(
@@ -349,6 +365,8 @@ class TD3_BC:  # noqa
         critic_1_optimizer: torch.optim.Optimizer,
         critic_2: nn.Module,
         critic_2_optimizer: torch.optim.Optimizer,
+        value: nn.Module,
+        value_optimizer: torch.optim.Optimizer,
         discount: float = 0.99,
         tau: float = 0.005,
         policy_noise: float = 0.2,
@@ -372,6 +390,8 @@ class TD3_BC:  # noqa
         self.critic_2 = critic_2
         self.critic_2_target = copy.deepcopy(critic_2)
         self.critic_2_optimizer = critic_2_optimizer
+        self.value = value
+        self.value_optimizer = value_optimizer
 
         self.max_action = max_action
         self.discount = discount
@@ -496,6 +516,13 @@ class TD3_BC:  # noqa
         state, action, reward, return_to_go, next_state, done = batch
         not_done = 1 - done
 
+        value = self.value(state)
+        value_loss = F.mse_loss(value, return_to_go)
+        log_dict["value_loss"] = value_loss.item()
+        self.value_optimizer.zero_grad()
+        value_loss.backward()
+        self.value_optimizer.step()
+
         with torch.no_grad():
             # Select action according to actor and add clipped noise
             noise = (torch.randn_like(action) * self.policy_noise).clamp(
@@ -512,13 +539,16 @@ class TD3_BC:  # noqa
             target_q = torch.min(target_q1, target_q2)
             target_q = reward + not_done * self.discount * target_q
 
+            target_value = reward + not_done * self.discount * self.value(next_state)
+
         # Get current Q estimates
         current_q1 = self.critic_1(state, action)
         current_q2 = self.critic_2(state, action)
 
         # Compute MC augmented target
-        new_target = torch.max(target_q, return_to_go)
-        bc_mask = (return_to_go > target_q).squeeze(-1)
+        new_target = torch.max(target_q, target_value)
+        bc_mask = (target_value > target_q).squeeze(-1)
+        log_dict['rl_proportion'] = 1 - bc_mask.float().mean().item()
 
         # Compute critic loss
         critic_loss = F.mse_loss(current_q1, new_target) + F.mse_loss(current_q2, new_target)
@@ -534,23 +564,29 @@ class TD3_BC:  # noqa
         # Delayed actor updates
         if self.total_it % self.policy_freq == 0:
             pi = self.actor(state)
-            
+
             bc_state = state[bc_mask]
             bc_action = action[bc_mask]
             bc_pi = pi[bc_mask]
-            
+
             rl_state = state[~bc_mask]
             rl_action = action[~bc_mask]
             rl_pi = pi[~bc_mask]
             # Compute BC actor loss
-            bc_actor_loss = F.mse_loss(bc_pi, bc_action)
-            
-            # Compute PG actor loss
-            q = self.critic_1(rl_state, rl_pi)
-            lmbda = self.alpha / q.abs().mean().detach()
+            if bc_state.shape[0] > 0:
+                bc_actor_loss = F.mse_loss(bc_pi, bc_action)
+            else:
+                bc_actor_loss = 0
 
-            rl_actor_loss = -lmbda * q.mean() + F.mse_loss(rl_pi, rl_action)
-            
+            # Compute PG actor loss
+            if rl_state.shape[0] > 0:
+                q = self.critic_1(rl_state, rl_pi)
+                lmbda = self.alpha / q.abs().mean().detach()
+
+                rl_actor_loss = -lmbda * q.mean() + F.mse_loss(rl_pi, rl_action)
+            else:
+                rl_actor_loss = 0
+
             actor_loss = bc_actor_loss + rl_actor_loss
             log_dict["actor_loss"] = actor_loss.item()
             # Optimize the actor
@@ -595,12 +631,19 @@ class TD3_BC:  # noqa
         actor_loss.backward()
         self.actor_optimizer.step()
 
+        current_value = self.value(state)
+        value_loss = F.mse_loss(current_value, return_to_go)
+        log_dict["value_loss"] = value_loss.item()
+        self.value_optimizer.zero_grad()
+        value_loss.backward()
+        self.value_optimizer.step()
+
         # Compute critic loss
         current_q1 = self.critic_1(state, action)
         current_q2 = self.critic_2(state, action)
 
-        critic_loss = F.mse_loss(current_q1, return_to_go) + F.mse_loss(
-            current_q2, return_to_go
+        critic_loss = F.mse_loss(current_q1, current_value.detach()) + F.mse_loss(
+            current_q2, current_value.detach()
         )
         log_dict["critic_loss"] = critic_loss.item()
 
@@ -755,6 +798,8 @@ def train(config: TrainConfig):
     critic_1_optimizer = torch.optim.Adam(critic_1.parameters(), lr=3e-4)
     critic_2 = Critic(state_dim, action_dim, config.critic_LN).to(config.device)
     critic_2_optimizer = torch.optim.Adam(critic_2.parameters(), lr=3e-4)
+    value = Value(state_dim, config.critic_LN).to(config.device)
+    value_optimizer = torch.optim.Adam(value.parameters(), lr=3e-4)
 
     kwargs = {
         "max_action": max_action,
@@ -764,6 +809,8 @@ def train(config: TrainConfig):
         "critic_1_optimizer": critic_1_optimizer,
         "critic_2": critic_2,
         "critic_2_optimizer": critic_2_optimizer,
+        "value": value,
+        "value_optimizer": value_optimizer,
         "discount": config.discount,
         "tau": config.tau,
         "device": config.device,
