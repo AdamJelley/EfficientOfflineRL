@@ -77,7 +77,9 @@ class TrainConfig:
     render: bool = False
 
     def __post_init__(self):
-        self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
+        if self.bc_regulariser > 0.0:
+            self.name = f"{self.name}-BC"
+        self.name = f"{self.name}-{self.env_name}"#-{str(uuid.uuid4())[:8]}
         if self.checkpoints_path is not None:
             time=datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
             self.checkpoints_path = os.path.join(self.checkpoints_path, time, self.name)
