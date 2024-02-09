@@ -66,10 +66,10 @@ class TrainConfig:
     name: str = "CQL"
 
     def __post_init__(self):
-        self.name = f"{self.name}-{self.env}-{str(uuid.uuid4())[:8]}"
+        self.name = f"{self.name}-{self.env}"#{str(uuid.uuid4())[:8]}
         if self.checkpoints_path is not None:
             time=datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
-            self.checkpoints_path = os.path.join(self.checkpoints_path, time, self.name)
+            self.checkpoints_path = os.path.join(self.checkpoints_path, f"{time}_{self.name}")
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
