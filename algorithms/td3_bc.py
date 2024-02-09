@@ -759,22 +759,28 @@ def train(config: TrainConfig):
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
             print(f"Time steps: {t + 1}")
-            eval_scores = eval_actor(
+            eval_returns = eval_actor(
                 env,
                 actor,
                 device=config.device,
                 n_episodes=config.n_episodes,
                 seed=config.seed,
             )
-            eval_score = eval_scores.mean()
-            normalized_eval_scores = env.get_normalized_score(eval_scores) * 100.0
-            normalized_eval_score = np.mean(normalized_eval_scores)
-            normalized_eval_score_std = np.std(normalized_eval_scores)
-            evaluations.append(normalized_eval_score)
+            eval_log = {
+                "eval/reward_mean": np.mean(eval_returns),
+                "eval/reward_std": np.std(eval_returns),
+                "epoch": int((t+1)/1000),
+            }
+            if hasattr(env, "get_normalized_score"):
+                normalized_score = env.get_normalized_score(eval_returns) * 100.0
+                eval_log["eval/normalized_score_mean"] = np.mean(normalized_score)
+                eval_log["eval/normalized_score_std"] = np.std(normalized_score)
+
+            wandb.log(eval_log)
             print("---------------------------------------")
             print(
                 f"Evaluation over {config.n_episodes} episodes: "
-                f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
+                f"{np.mean(eval_returns):.3f} , D4RL score: {np.mean(normalized_score):.3f}"
             )
             print("---------------------------------------")
             if config.checkpoints_path is not None:
@@ -787,16 +793,11 @@ def train(config: TrainConfig):
                 if len(checkpoints) > 10:
                     oldest_checkpoint = checkpoints.pop(0)
                     os.remove(oldest_checkpoint)
-                df = pd.DataFrame({"epoch": int((t+1)/1000), "return_mean": np.mean(eval_scores), "return_std": np.std(eval_scores), "normalized_score_mean": np.mean(normalized_eval_score), "normalized_score_std": np.std(normalized_eval_score_std)}, index=[0])
+                df = pd.DataFrame({"epoch": int((t+1)/1000), "return_mean": np.mean(eval_returns), "return_std": np.std(eval_returns), "normalized_score_mean": np.mean(normalized_score), "normalized_score_std": np.std(normalized_score)}, index=[0])
                 if not os.path.exists(os.path.join(config.checkpoints_path, "results.csv")):
                     df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), index=False)
                 else:
                     df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), mode='a', header=False, index=False)
-
-            wandb.log(
-                {"d4rl_normalized_score": normalized_eval_score},
-                step=trainer.total_it,
-            )
 
     # testing
     test_returns = eval_actor(
