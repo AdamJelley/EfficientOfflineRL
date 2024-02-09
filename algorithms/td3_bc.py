@@ -543,7 +543,7 @@ class TD3_BC:  # noqa
         critic_loss = F.mse_loss(current_q1, return_to_go) + F.mse_loss(
             current_q2, return_to_go
         )
-        log_dict["critic_loss"] = critic_loss.item()
+        log_dict["MC_critic_loss"] = critic_loss.item()
 
         # self.td_component = self.total_it / self.pretrain_steps
         # log_dict["td_component"] = self.td_component
@@ -595,7 +595,8 @@ class TD3_BC:  # noqa
                 * cql_regulariser
                 / cql_regulariser.detach()
             )
-
+            
+        log_dict["critic_loss"] = critic_loss.item()
         # Optimize the critic
         self.critic_1_optimizer.zero_grad()
         self.critic_2_optimizer.zero_grad()
