@@ -345,13 +345,23 @@ def eval_actor(
     env.seed(seed)
     actor.eval()
     episode_rewards = []
+    # Max demonstration lengths for each environment from human data
+    max_demonstration_lengths = {'pen-human': 200, 'door-human': 300, 'hammer-human': 624, 'relocate-human': 527}
+    max_demonstration_length = None
+    for s in max_demonstration_lengths.keys():
+        if s in env.spec.id:
+            max_demonstration_length = max_demonstration_lengths[s]
     for _ in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
+        timestep = 0
         while not done:
             action = actor.act(state, device)
             state, reward, done, _ = env.step(action)
+            timestep+=1
             episode_reward += reward
+            if max_demonstration_length is not None and timestep < max_demonstration_length:
+                done = False
         episode_rewards.append(episode_reward)
 
     actor.train()

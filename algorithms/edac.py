@@ -938,6 +938,12 @@ def eval_actor(
     actor.eval()
     episode_rewards = []
     video = VideoRecorder() if render else None
+    # Max demonstration lengths for each environment from human data
+    max_demonstration_lengths = {'pen-human': 200, 'door-human': 300, 'hammer-human': 624, 'relocate-human': 527}
+    max_demonstration_length = None
+    for s in max_demonstration_lengths.keys():
+        if s in env.spec.id:
+            max_demonstration_length = max_demonstration_lengths[s]
     for i in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
@@ -949,6 +955,8 @@ def eval_actor(
             episode_reward += reward
             if video is not None and i == 0:  # Record 1 episode
                 video.record(env)
+            if max_demonstration_length is not None and timestep < max_demonstration_length:
+                done = False
         episode_rewards.append(episode_reward)
 
     actor.train()
