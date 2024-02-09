@@ -13,6 +13,7 @@ import uuid
 import d4rl
 import gym
 import numpy as np
+import pandas as pd
 import pyrallis
 import torch
 from torch.distributions import Normal, TanhTransform, TransformedDistribution
@@ -1181,7 +1182,9 @@ def train(config: TrainConfig):
                 seed=config.seed,
             )
             eval_score = eval_scores.mean()
-            normalized_eval_score = env.get_normalized_score(eval_score) * 100.0
+            normalized_eval_scores = env.get_normalized_score(eval_scores) * 100.0
+            normalized_eval_score = np.mean(normalized_eval_scores)
+            normalized_eval_score_std = np.std(normalized_eval_scores)
             evaluations.append(normalized_eval_score)
             print("---------------------------------------")
             print(
@@ -1199,6 +1202,11 @@ def train(config: TrainConfig):
                 if len(checkpoints) > 10:
                     oldest_checkpoint = checkpoints.pop(0)
                     os.remove(oldest_checkpoint)
+                df = pd.DataFrame({"epoch": (t+1)/1000, "return_mean": np.mean(eval_scores), "return_std": np.std(eval_scores), "normalized_score_mean": np.mean(normalized_eval_score), "normalized_score_std": np.std(normalized_eval_score_std)}, index=[0])
+                if not os.path.exists(os.path.join(config.checkpoints_path, "results.csv")):
+                    df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), index=False)
+                else:
+                    df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), mode='a', header=False, index=False)
             wandb.log(
                 {"d4rl_normalized_score": normalized_eval_score},
                 step=trainer.total_it,

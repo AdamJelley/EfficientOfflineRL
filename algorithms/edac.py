@@ -14,6 +14,7 @@ import uuid
 import d4rl
 import gym
 import numpy as np
+import pandas as pd
 import pyrallis
 import torch
 from torch.distributions import Normal
@@ -250,7 +251,7 @@ class ReplayBuffer:
                 self._entropy_bonuses[
                     return_batch_size * i : min(return_batch_size * (i + 1), n_transitions)
                 ] = -log_pi.detach().unsqueeze(-1)
-            
+
         # mid=time.time()
         # print(f'Mid: {mid-start}')
 
@@ -1056,13 +1057,13 @@ def train(config: TrainConfig):
         actor_kl_regulariser=config.actor_kl_regulariser,
         device=config.device,
     )
-    
+
     # Load checkpoint
     if config.load_model != None:
         policy_file = Path(config.load_model)
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
-        
+
     # saving config to the checkpoint
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
@@ -1157,6 +1158,12 @@ def train(config: TrainConfig):
                 if len(checkpoints) > 10:
                     oldest_checkpoint = checkpoints.pop(0)
                     os.remove(oldest_checkpoint)
+                df = pd.DataFrame({"epoch": epoch, "return_mean": np.mean(eval_returns), "return_std": np.std(eval_returns), "normalized_score_mean": np.mean(normalized_score), "normalized_score_std": np.std(normalized_score)}, index=[0])
+                if not os.path.exists(os.path.join(config.checkpoints_path, "results.csv")):
+                    df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), index=False)
+                else:
+                    df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), mode='a', header=False, index=False)
+
 
     # testing
     test_returns = eval_actor(
