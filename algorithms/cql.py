@@ -1205,14 +1205,14 @@ def train(config: TrainConfig):
             if config.checkpoints_path:
                 torch.save(
                     trainer.state_dict(),
-                    os.path.join(config.checkpoints_path, f"checkpoint_{(t+1)/1000}.pt"),
+                    os.path.join(config.checkpoints_path, f"checkpoint_{int((t+1)/1000)}.pt"),
                 )
                 checkpoints = [os.path.join(config.checkpoints_path, file) for file in os.listdir(config.checkpoints_path) if os.path.splitext(file)[-1]=='.pt']
                 checkpoints.sort(key=os.path.getmtime)
                 if len(checkpoints) > 10:
                     oldest_checkpoint = checkpoints.pop(0)
                     os.remove(oldest_checkpoint)
-                df = pd.DataFrame({"epoch": (t+1)/1000, "return_mean": np.mean(eval_scores), "return_std": np.std(eval_scores), "normalized_score_mean": np.mean(normalized_eval_score), "normalized_score_std": np.std(normalized_eval_score_std)}, index=[0])
+                df = pd.DataFrame({"epoch": int((t+1)/1000), "return_mean": np.mean(eval_scores), "return_std": np.std(eval_scores), "normalized_score_mean": np.mean(normalized_eval_score), "normalized_score_std": np.std(normalized_eval_score_std)}, index=[0])
                 if not os.path.exists(os.path.join(config.checkpoints_path, "results.csv")):
                     df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), index=False)
                 else:
