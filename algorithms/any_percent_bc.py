@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import os
 from pathlib import Path
 import random
@@ -46,7 +47,8 @@ class TrainConfig:
     def __post_init__(self):
         self.name = f"{self.name}-{self.env}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
+            time=datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
+            self.checkpoints_path = os.path.join(self.checkpoints_path, time, self.name)
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
@@ -480,8 +482,13 @@ def train(config: TrainConfig):
             if config.checkpoints_path is not None:
                 torch.save(
                     trainer.state_dict(),
-                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                    os.path.join(config.checkpoints_path, f"checkpoint_{(t+1)/1000}.pt"),
                 )
+                checkpoints = [os.path.join(config.checkpoints_path, file) for file in os.listdir(config.checkpoints_path) if os.path.splitext(file)[-1]=='.pt']
+                checkpoints.sort(key=os.path.getmtime)
+                if len(checkpoints) > 10:
+                    oldest_checkpoint = checkpoints.pop(0)
+                    os.remove(oldest_checkpoint)
             wandb.log(
                 {"d4rl_normalized_score": normalized_eval_score},
                 step=trainer.total_it,

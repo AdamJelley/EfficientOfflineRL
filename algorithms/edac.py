@@ -4,6 +4,7 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import math
 import os
 from pathlib import Path
@@ -77,7 +78,8 @@ class TrainConfig:
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
+            time=datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
+            self.checkpoints_path = os.path.join(self.checkpoints_path, time, self.name)
 
 
 # general utils
@@ -1150,6 +1152,11 @@ def train(config: TrainConfig):
                     trainer.state_dict(),
                     os.path.join(config.checkpoints_path, f"{epoch}.pt"),
                 )
+                checkpoints = [os.path.join(config.checkpoints_path, file) for file in os.listdir(config.checkpoints_path) if os.path.splitext(file)[-1]=='.pt']
+                checkpoints.sort(key=os.path.getmtime)
+                if len(checkpoints) > 10:
+                    oldest_checkpoint = checkpoints.pop(0)
+                    os.remove(oldest_checkpoint)
 
     # testing
     test_returns = eval_actor(
