@@ -941,7 +941,7 @@ def eval_actor(
     episode_rewards = []
     video = VideoRecorder() if render else None
     # Max demonstration lengths for each environment from human data
-    max_demonstration_lengths = {'pen-human': 200, 'door-human': 300, 'hammer-human': 624, 'relocate-human': 527}
+    max_demonstration_lengths = {'pen-human': 100, 'door-human': 300, 'hammer-human': 624, 'relocate-human': 527}
     max_demonstration_length = None
     for s in max_demonstration_lengths.keys():
         if s in env.spec.id:
