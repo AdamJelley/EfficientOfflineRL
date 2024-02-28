@@ -9,6 +9,7 @@ videos
 *.txt
 plotting
 .vscode
+*.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
