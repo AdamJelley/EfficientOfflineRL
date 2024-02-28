@@ -346,7 +346,8 @@ def eval_actor(
     env.seed(seed)
     actor.eval()
     episode_rewards = []
-    # Max demonstration lengths for each environment from human data
+    # Max demonstration lengths for each environment from human data (described in Appendix H of paper)
+    # TODO: Create env wrapper for harcoded truncation fix below for code release
     max_demonstration_lengths = {'pen': 100, 'door': 300, 'hammer': 624, 'relocate': 527}
     max_demonstration_length = None
     for s in max_demonstration_lengths.keys():

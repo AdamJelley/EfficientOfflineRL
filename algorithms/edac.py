@@ -67,11 +67,6 @@ class TrainConfig:
     td_component: float = -1.0
     bc_regulariser: float = -1.0
     soft_bc_regulariser: float = -1.0
-    pretrain_cql_regulariser: float = -1.0
-    cql_regulariser: float = -1.0
-    cql_n_actions: int = 10
-    kl_regulariser: float = -1.0
-    actor_kl_regulariser: float = -1.0
     actor_LN: bool = True
     critic_LN: bool = True
     render: bool = False
@@ -214,7 +209,7 @@ class ReplayBuffer:
             episode_rewards.append(data["rewards"][i])
             if (
                 data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1
-            ):  # TODO: Could better handle incomplete trajectory case?
+            ):
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
                 )
@@ -236,9 +231,6 @@ class ReplayBuffer:
         episode_rewards = []
         episode_entropy_bonuses = []
         soft_returns_to_go = []
-        # import time
-        # start=time.time()
-        # print(f'Start: {start-start}')
 
         return_batch_size = 10 * self._batch_size # Speeds up computation of entropy for each state, action pair
         with torch.no_grad():
@@ -254,9 +246,6 @@ class ReplayBuffer:
                     return_batch_size * i : min(return_batch_size * (i + 1), n_transitions)
                 ] = -log_pi.detach().unsqueeze(-1)
 
-        # mid=time.time()
-        # print(f'Mid: {mid-start}')
-
         for i in range(n_transitions):
             episode_rewards.append(self._rewards[i].item())
             episode_entropy_bonuses.append(self._entropy_bonuses[i].item())
@@ -271,12 +260,9 @@ class ReplayBuffer:
                     self._discount,
                     include_first=False,
                 )
-                #episode_returns_to_go = self._to_tensor(episode_returns_to_go)
                 soft_returns_to_go.append(episode_returns_to_go)
                 episode_rewards = []
                 episode_entropy_bonuses = []
-        # end=time.time()
-        # print(f'End: {end-start}')
 
         self._soft_returns_to_go[:n_transitions] = (
             self._to_tensor(
@@ -424,7 +410,6 @@ class Actor(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden = self.trunk(state)
         mu, log_sigma = self.mu(hidden), self.log_sigma(hidden)
-        # wandb.log({"policy_sigma": torch.exp(log_sigma).mean()})
 
         # clipping params from EDAC paper, not as in SAC paper (-20, 2)
         log_sigma = torch.clip(log_sigma, -5, 2)
@@ -535,11 +520,6 @@ class EDAC:
         bc_regulariser: float = -1.0,
         soft_bc_regulariser: float = -1.0,
         td_component: float = -1.0,
-        pretrain_cql_regulariser: float = -1.0,
-        cql_regulariser: float = -1.0,
-        cql_n_actions: int = 10,
-        kl_regulariser: float = -1.0,
-        actor_kl_regulariser: float = -1.0,
         device: str = "cpu",  # noqa
     ):
         self.device = device
@@ -555,7 +535,6 @@ class EDAC:
         self.tau = tau
         self.gamma = gamma
         self.eta = eta
-        # self.pretrain_eta = eta
 
         if bc_regulariser > 0.0:
             assert (
@@ -568,11 +547,6 @@ class EDAC:
                 td_component <= 1.0
             ), "TD_component_must be between 0 and 1 (default: 0)."
         self.td_component = td_component
-        self.pretrain_cql_regulariser = pretrain_cql_regulariser
-        self.cql_regulariser = cql_regulariser
-        self.cql_n_actions = cql_n_actions
-        self.kl_regulariser = kl_regulariser
-        self.actor_kl_regulariser = actor_kl_regulariser
 
         # adaptive alpha setup
         self.target_entropy = -float(self.actor.action_dim)
@@ -627,19 +601,6 @@ class EDAC:
             )
         else:
             loss = (self.alpha * log_pi - q_value_min).mean()
-
-        if self.actor_kl_regulariser > 0.0:
-            (
-                pretrained_action,
-                pretrained_log_prob,
-                pretrained_policy_dist,
-            ) = self.pretrained_actor(state, need_policy_dist=True)
-            KL_regulariser = torch.distributions.kl.kl_divergence(
-                policy_dist, pretrained_policy_dist
-            ).mean()
-            loss = loss / loss.detach() + self.actor_kl_regulariser * KL_regulariser / (
-                KL_regulariser.detach() + 1e-6
-            )
 
         return loss, batch_entropy, q_value_std
 
@@ -702,7 +663,7 @@ class EDAC:
 
             assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
             q_target = reward + self.gamma * (1 - done) * q_next.unsqueeze(-1)
-            #q_target = torch.max(return_to_go, q_target)
+            #q_target = torch.max(return_to_go, q_target) # Investigated taking max rather than pre-training, but found it more unreliable
 
         q_values = self.critic(state, action)
 
@@ -711,37 +672,6 @@ class EDAC:
         diversity_loss = self._critic_diversity_loss(state, action)
 
         loss = critic_loss + self.eta * diversity_loss
-
-        if self.kl_regulariser > 0.0:
-            pretrained_q_values = self.pretrained_critic(state, action)
-
-            KL_regulariser = F.mse_loss(
-                q_values.min(0).values, pretrained_q_values.min(0).values
-            )
-            loss = loss / loss.detach() + self.kl_regulariser * KL_regulariser / (
-                KL_regulariser.detach() + 1e-6
-            )
-        if self.cql_regulariser > 0.0:
-            random_actions = action.new_empty(
-                (self.cql_n_actions * action.shape[0], action.shape[1]),
-                requires_grad=False,
-            ).uniform_(-1, 1)
-            repeated_state = state.repeat(self.cql_n_actions, 1)
-            q_random_values = self.critic(repeated_state, random_actions).reshape(
-                q_values.shape[0], q_values.shape[1], self.cql_n_actions
-            )
-            cql_regulariser = (
-                torch.logsumexp(
-                    q_random_values.min(0).values,
-                    dim=-1,
-                )
-                - q_values.min(0).values
-            ).mean()
-
-            loss = (
-                loss / loss.detach()
-                + self.cql_regulariser * cql_regulariser / cql_regulariser.detach()
-            )
 
         return loss
 
@@ -810,31 +740,6 @@ class EDAC:
                 + self.eta * diversity_loss
             )
             log_dict["TD_critic_loss"] = TD_critic_loss.item()
-
-        if self.pretrain_cql_regulariser > 0.0:
-            random_actions = action.new_empty(
-                (self.cql_n_actions * action.shape[0], action.shape[1]),
-                requires_grad=False,
-            ).uniform_(-1, 1)
-            repeated_state = state.repeat(self.cql_n_actions, 1)
-            q_random_values = self.critic(repeated_state, random_actions).reshape(
-                q_values.shape[0], q_values.shape[1], self.cql_n_actions
-            )
-            cql_regulariser = (
-                torch.logsumexp(
-                    q_random_values.min(0).values,
-                    dim=-1,
-                )
-                - q_values.min(0).values
-            ).mean()
-
-            critic_loss = (
-                critic_loss / critic_loss.detach()
-                + self.pretrain_cql_regulariser
-                * cql_regulariser
-                / cql_regulariser.detach()
-            )
-            log_dict["cql_regulariser"] = cql_regulariser.item()
 
         # Optimize the critic
         self.critic_optimizer.zero_grad()
@@ -940,7 +845,8 @@ def eval_actor(
     actor.eval()
     episode_rewards = []
     video = VideoRecorder() if render else None
-    # Max demonstration lengths for each environment from human data
+    # Max demonstration lengths for each environment from human data (described in Appendix H of paper)
+    # TODO: Create env wrapper for harcoded truncation fix below for code release
     max_demonstration_lengths = {'pen': 100, 'door': 300, 'hammer': 624, 'relocate': 527}
     max_demonstration_length = None
     for s in max_demonstration_lengths.keys():
@@ -1056,15 +962,9 @@ def train(config: TrainConfig):
         gamma=config.gamma,
         tau=config.tau,
         eta=config.eta,
-        # pretrain_eta=config.pretrain_eta,
         alpha_learning_rate=config.alpha_learning_rate,
         bc_regulariser=config.bc_regulariser,
         td_component=config.td_component,
-        pretrain_cql_regulariser=config.pretrain_cql_regulariser,
-        cql_regulariser=config.cql_regulariser,
-        cql_n_actions=config.cql_n_actions,
-        kl_regulariser=config.kl_regulariser,
-        actor_kl_regulariser=config.actor_kl_regulariser,
         device=config.device,
     )
 

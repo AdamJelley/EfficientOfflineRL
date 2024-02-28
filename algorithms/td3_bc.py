@@ -53,7 +53,6 @@ class TrainConfig:
     pretrain_cql_regulariser: float = -1.0  # CQL regularisation for pretraining
     cql_regulariser: float = -1.0  # CQL regularisation in training
     cql_n_actions: int = 10  # Number of actions to sample for CQL
-    kl_regulariser: float = -1.0  # Critic KL regularisation in training
     actor_LN: bool = True  # Use LayerNorm in actor
     critic_LN: bool = True  # Use LayerNorm in critic
     # Wandb logging
@@ -248,7 +247,8 @@ def eval_actor(
     env.seed(seed)
     actor.eval()
     episode_rewards = []
-    # Max demonstration lengths for each environment from human data
+    # Max demonstration lengths for each environment from human data (described in Appendix H of paper)
+    # TODO: Create env wrapper for harcoded truncation fix below for code release
     max_demonstration_lengths = {'pen': 100, 'door': 300, 'hammer': 624, 'relocate': 527}
     max_demonstration_length = None
     for s in max_demonstration_lengths.keys():
@@ -297,8 +297,6 @@ def return_reward_range(dataset, max_episode_steps):
 def modify_reward(dataset, env_name):
     if any(s in env_name for s in ("halfcheetah", "hopper", "walker2d")):
         max_episode_steps = 1000
-    # elif any(s in env_name for s in ("human", "cloned")):
-    #     max_episode_steps = 200
         min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
         dataset["rewards"] /= max_ret - min_ret
         dataset["rewards"] *= max_episode_steps
@@ -377,7 +375,6 @@ class TD3_BC:  # noqa
         pretrain_cql_regulariser: float = 0,
         cql_regulariser: float = 0,
         cql_n_actions: int = 10,
-        kl_regulariser: float = 0,
         device: str = "cpu",
     ):
         self.actor = actor
@@ -406,7 +403,6 @@ class TD3_BC:  # noqa
         self.pretrain_cql_regulariser = pretrain_cql_regulariser
         self.cql_regulariser = cql_regulariser
         self.cql_n_actions = cql_n_actions
-        self.kl_regulariser = kl_regulariser
 
         self.total_it = 0
         self.pretrain_steps = pretrain_steps
@@ -442,18 +438,6 @@ class TD3_BC:  # noqa
         # Compute critic loss
         critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
         log_dict["critic_loss"] = critic_loss.item()
-
-        if self.kl_regulariser > 0.0:
-            pretrain_q1 = self.pretrained_critic_1(state, action)
-            pretrain_q2 = self.pretrained_critic_2(state, action)
-            KL_regulariser = F.mse_loss(current_q1, pretrain_q1) + F.mse_loss(
-                current_q2, pretrain_q2
-            )  # Proportional to KL divergence between Gaussian critics with fixed standard deviation
-            log_dict["KL_regulariser"] = KL_regulariser.item()
-            critic_loss = (
-                critic_loss / critic_loss.detach()
-                + self.kl_regulariser * KL_regulariser / (KL_regulariser.detach() + 1e-6)
-            )
 
         if self.cql_regulariser > 0.0:
             # Compute CQL regularisation
@@ -545,8 +529,6 @@ class TD3_BC:  # noqa
         )
         log_dict["MC_critic_loss"] = critic_loss.item()
 
-        # self.td_component = self.total_it / self.pretrain_steps
-        # log_dict["td_component"] = self.td_component
         if self.td_component > 0.0:
             with torch.no_grad():
                 # Select action according to actor and add clipped noise
@@ -721,7 +703,6 @@ def train(config: TrainConfig):
         "pretrain_cql_regulariser": config.pretrain_cql_regulariser,
         "cql_regulariser": config.cql_regulariser,
         "cql_n_actions": config.cql_n_actions,
-        "kl_regulariser": config.kl_regulariser,
     }
 
     print("---------------------------------------")
