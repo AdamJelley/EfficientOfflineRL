@@ -5,7 +5,6 @@ import copy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import os
-import pandas as pd
 from pathlib import Path
 import random
 import uuid
@@ -13,10 +12,12 @@ import uuid
 import d4rl
 import gym
 import numpy as np
+import pandas as pd
 import pyrallis
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 import wandb
 
 TensorBatch = List[torch.Tensor]

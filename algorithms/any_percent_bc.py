@@ -12,9 +12,10 @@ import numpy as np
 import pandas as pd
 import pyrallis
 import torch
+from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal
+
 import wandb
 
 TensorBatch = List[torch.Tensor]

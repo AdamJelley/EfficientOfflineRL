@@ -1,6 +1,7 @@
-import imageio
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
+import imageio
 
 
 class VideoRecorder(object):
