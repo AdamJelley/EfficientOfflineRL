@@ -20,7 +20,7 @@ This codebase builds on the excellent [CORL](https://github.com/tinkoff-ai/CORL)
 
 Note that since this research was undertaken, the CORL codebase has been significantly improved and refactored (for example to include offline-to-online algorithms). This codebase does not include these updates in order to preserve the codebase that was used for our research and to prevent any discrepencies with results in the paper. However, if you are interested in continuing an aspect of this research it should be straightforward (ish!) to merge our changes into the latest CORL codebase. Feel free to raise an issue if you are interested in doing so and we would be happy to help.
 
-Please note also that [ReBRAC](https://arxiv.org/abs/2305.09836) (developed concurrently with this research and now included in the updated CORL codebase) contains many similar auxiliary findings for improving the efficiency and stability of offline off-policy reinforcement learning algorithms (such as the use of layer normalisation, deeper networks, and decoupled penalisation on **both** the actor and critic) and is recommended as a base offline off-policy algorithm for future research. However, ReBRAC does **not** include any form of supervised pre-training to improve efficiency (the core contribution of our work).
+Please note also that [ReBRAC](https://arxiv.org/abs/2305.09836) (developed concurrently with this research and now included in the updated CORL codebase) contains many similar auxiliary findings for improving the efficiency and stability of offline off-policy reinforcement learning algorithms (such as the use of layer normalization, deeper networks, and decoupled penalization on **both** the actor and critic) and is recommended as a base offline off-policy algorithm for future research. However, ReBRAC does **not** include any form of supervised pre-training to improve efficiency (the core contribution of our work).
 
 ## Installation
 
@@ -78,7 +78,7 @@ If you would like to cite our work on improving the efficiency and stability of 
 ```bibtex
 ```
 
-Otherwise, if you are only interested in citing the CORL codebase, please use:
+Otherwise, if you are interested in citing the CORL codebase, please use:
 
 ```bibtex
 @inproceedings{
