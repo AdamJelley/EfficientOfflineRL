@@ -1,10 +1,10 @@
-# Efficient Offline Reinforcement Learning: The Critic is Critical
+# Efficient Offline Reinforcement Learning:</br>The Critic is Critical
 
 [<img src="https://img.shields.io/badge/license-Apache_2.0-blue">](https://github.com/tinkoff-ai/CORL/blob/main/LICENSE)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Imports: isort](https://img.shields.io/badge/%20imports-isort-%231674b1?style=flat&labelColor=ef8336)](https://pycqa.github.io/isort/)
 
-This repository contains the codebase to reproduce the experiments for the paper: Efficient Offline Reinforcement Learning: The Critic is Critical. This paper investigates improving the efficiency and stability of offline off-policy reinforcement learning algorithms (such as TD3+BC and EDAC) through supervised pre-training of both the actor and the critic to match the behavior policy.
+This repository contains the codebase for the paper: Efficient Offline Reinforcement Learning: The Critic is Critical. This paper investigates improving the efficiency and stability of offline off-policy reinforcement learning algorithms (such as TD3+BC and EDAC) through supervised pre-training of both the actor and the critic to match the behavior policy.
 
 ![MotivationalExample](assets/GitHubFigure.png)
 
@@ -18,7 +18,7 @@ This codebase builds on the excellent [CORL](https://github.com/tinkoff-ai/CORL)
 > * 📈 Benchmarked Implementation for N algorithms
 > * 🖼 [Weights and Biases](https://wandb.ai/site) integration
 
-Note that since this research was undertaken, the CORL codebase has been significantly improved and refactored (for example to include offline-to-online algorithms). This codebase does not include these updates in order to preserve the codebase that was used for our research and to prevent any discrepencies with results in the paper. However, if you are interested in continuing an aspect of this research it should be straightforward (ish!) to merge our changes into the latest CORL codebase. Feel free to raise an issue if you are interested in doing so and we would be happy to help.
+Note that since this research was undertaken, the CORL codebase has been significantly improved and refactored (for example to include offline-to-online algorithms). This codebase does not include these updates in order to preserve the codebase that was used for our research and to prevent any discrepencies with results in the paper. However, if you are interested in continuing an aspect of this research it should be straightforward (ish!) to merge our changes into the latest CORL codebase. Feel free to raise an issue if you need any help with doing so.
 
 Please note also that [ReBRAC](https://arxiv.org/abs/2305.09836) (developed concurrently with this research and now included in the updated CORL codebase) contains many similar auxiliary findings for improving the efficiency and stability of offline off-policy reinforcement learning algorithms (such as the use of layer normalization, deeper networks, and decoupled penalization on **both** the actor and critic) and is recommended as a base offline off-policy algorithm for future research. However, ReBRAC does **not** include any form of supervised pre-training to improve efficiency (the core contribution of our work).
 
@@ -26,7 +26,9 @@ Please note also that [ReBRAC](https://arxiv.org/abs/2305.09836) (developed conc
 
 ```bash
 git clone git@github.com:AdamJelley/EfficientOfflineRL.git && cd EfficientOfflineRL
-pip install -r requirements_dev.txt
+conda create -n EORL python=3.10
+conda activate EORL
+pip install -r requirements/requirements_dev.txt
 
 # alternatively, you could use docker
 docker build -t <image_name> .
