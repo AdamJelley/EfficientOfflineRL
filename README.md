@@ -42,13 +42,13 @@ docker run gpus=all -it --rm --name <container_name> <image_name>
 To reproduce our results for TD3+BC on Hopper-medium:
 
 ```bash
-python algorithms/td3_bc.py --config=configs/td3_bc/hopper/medium_v2.yaml --device cuda:0 --alpha 10 --pretrain AC --pretrain_steps 10000 --td_component 0 --eval_freq 1000 --seed 0
+python algorithms/td3_bc.py --config=configs/td3_bc/hopper/medium_v2.yaml --pretrain AC --pretrain_steps 10000 --td_component 0
 ```
 
 Or for EDAC on Hopper-medium:
 
 ```bash
-python algorithms/edac.py --config=configs/edac/hopper/medium_v2.yaml --eval_every 1 --num_epochs 300 --device cuda:0 --pretrain softAC --pretrain_epochs 20 --train_seed 0 --eval_seed 1
+python algorithms/edac.py --config=configs/edac/hopper/medium_v2.yaml --pretrain softAC --pretrain_epochs 20 --td_component 0
 ```
 
 Note these assume access to a CUDA device to run (otherwise set `--device cpu`).
@@ -62,14 +62,14 @@ The pre-training argument can also be set to `--pretrain BC` to only pretrain th
 To run our hybrid algorithms TD3+BC+CQL and EDAC+BC introduced for improved stability on the Adroit environments:
 
 ```bash
-python algorithms/td3_bc.py --config=configs/td3_bc/pen/human_v1.yaml --eval_freq 1000 --max_timesteps 300000 --pretrain AC --pretrain_steps 200000 --pretrain_cql_regulariser 1 --cql_regulariser 1 --device cuda:0 --seed 0
+python algorithms/td3_bc.py --config=configs/td3_bc/pen/human_v1.yaml --pretrain AC --pretrain_steps 200000 --pretrain_cql_regulariser 1 --cql_regulariser 1
 ```
 
 ```bash
-python algorithms/edac.py --config=configs/edac/pen/human_v1.yaml --eval_every 1 --num_epochs 300 --bc_regulariser 1 --pretrain softAC --pretrain_epochs 200 --device cuda:0 --train_seed 0 --eval_seed 1
+python algorithms/edac.py --config=configs/edac/pen/human_v1.yaml --pretrain softAC --pretrain_epochs 200 --bc_regulariser 1
 ```
 
-For full details and hyperparameters please see Appendix G of the paper.
+The additional regularisation components can be adjusted by changing the argument or in the config. For full details and hyperparameters please see Appendix G of the paper.
 
 Note that performance on these environments is very high variance due to the limited data and and nature of the environment (particularly the shaping of the reward). Also note that we updated the evaluation procedure for these environments *for all algorithms* for fairer comparison, since we noticed that the timeout for these environments was set to be significantly shorter than the length of the provided demonstrations...! This is discussed in the paper in Appendix H.
 

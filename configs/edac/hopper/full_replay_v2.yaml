@@ -9,7 +9,7 @@ device: cuda
 env_name: "hopper-full-replay-v2"
 eta: 1.0
 eval_episodes: 10
-eval_every: 5
+eval_every: 1
 eval_seed: 42
 gamma: 0.99
 group: "edac-hopper-full-replay-v2-multiseed-v2"

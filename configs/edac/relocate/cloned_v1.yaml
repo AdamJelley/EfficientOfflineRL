@@ -9,7 +9,7 @@ device: cuda
 env_name: "relocate-cloned-v1"
 eta: 200.0
 eval_episodes: 10
-eval_every: 5
+eval_every: 1
 eval_seed: 42
 gamma: 0.99
 group: "edac-relocate-cloned-v1-multiseed-v2"
@@ -19,7 +19,7 @@ max_action: 1.0
 name: "EDAC"
 normalize_reward: false
 num_critics: 50
-num_epochs: 3000
+num_epochs: 300
 num_updates_on_epoch: 1000
 project: offline-RL-init
 tau: 0.005

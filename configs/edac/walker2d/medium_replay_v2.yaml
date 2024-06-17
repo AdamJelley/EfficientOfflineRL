@@ -9,7 +9,7 @@ device: cuda
 env_name: "walker2d-medium-replay-v2"
 eta: 1.0
 eval_episodes: 10
-eval_every: 5
+eval_every: 1
 eval_seed: 42
 gamma: 0.99
 group: "edac-walker2d-medium-replay-v2-multiseed-v2"
@@ -19,7 +19,7 @@ max_action: 1.0
 name: "EDAC"
 normalize_reward: false
 num_critics: 10
-num_epochs: 3000
+num_epochs: 12000
 num_updates_on_epoch: 1000
 project: offline-RL-init
 tau: 0.005
