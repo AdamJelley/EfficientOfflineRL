@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional
 from tqdm import trange
-
 import wandb
 
 TensorBatch = List[torch.Tensor]
@@ -48,7 +47,9 @@ class TrainConfig:
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
+            self.checkpoints_path = os.path.join(
+                self.checkpoints_path, self.name
+            )
 
 
 class ReplayBuffer:
@@ -69,11 +70,15 @@ class ReplayBuffer:
         self._actions = torch.zeros(
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
-        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._rewards = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
-        self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._dones = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
@@ -81,7 +86,9 @@ class ReplayBuffer:
 
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
-            raise ValueError("Trying to load data into non-empty replay buffer")
+            raise ValueError(
+                "Trying to load data into non-empty replay buffer"
+            )
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
             raise ValueError(
@@ -89,16 +96,24 @@ class ReplayBuffer:
             )
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
-        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._rewards[:n_transitions] = self._to_tensor(
+            data["rewards"][..., None]
+        )
+        self._next_states[:n_transitions] = self._to_tensor(
+            data["next_observations"]
+        )
+        self._dones[:n_transitions] = self._to_tensor(
+            data["terminals"][..., None]
+        )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
-        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
+        indices = np.random.randint(
+            0, min(self._size, self._pointer), size=batch_size
+        )
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
@@ -133,24 +148,32 @@ class Actor(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, action_dim),
         )
-        self._log_std = nn.Parameter(torch.zeros(action_dim, dtype=torch.float32))
+        self._log_std = nn.Parameter(
+            torch.zeros(action_dim, dtype=torch.float32)
+        )
         self._min_log_std = min_log_std
         self._max_log_std = max_log_std
         self._min_action = min_action
         self._max_action = max_action
 
-    def _get_policy(self, state: torch.Tensor) -> torch.distributions.Distribution:
+    def _get_policy(
+        self, state: torch.Tensor
+    ) -> torch.distributions.Distribution:
         mean = self._mlp(state)
         log_std = self._log_std.clamp(self._min_log_std, self._max_log_std)
         policy = torch.distributions.Normal(mean, log_std.exp())
         return policy
 
-    def log_prob(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def log_prob(
+        self, state: torch.Tensor, action: torch.Tensor
+    ) -> torch.Tensor:
         policy = self._get_policy(state)
         log_prob = policy.log_prob(action).sum(-1, keepdim=True)
         return log_prob
 
-    def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, state: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         policy = self._get_policy(state)
         action = policy.rsample()
         action.clamp_(self._min_action, self._max_action)
@@ -186,14 +209,20 @@ class Critic(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, state: torch.Tensor, action: torch.Tensor
+    ) -> torch.Tensor:
         q_value = self._mlp(torch.cat([state, action], dim=-1))
         return q_value
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
-    for target_param, source_param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
+    for target_param, source_param in zip(
+        target.parameters(), source.parameters()
+    ):
+        target_param.data.copy_(
+            (1 - tau) * target_param.data + tau * source_param.data
+        )
 
 
 class AdvantageWeightedActorCritic:
@@ -230,11 +259,13 @@ class AdvantageWeightedActorCritic:
         with torch.no_grad():
             pi_action, _ = self._actor(states)
             v = torch.min(
-                self._critic_1(states, pi_action), self._critic_2(states, pi_action)
+                self._critic_1(states, pi_action),
+                self._critic_2(states, pi_action),
             )
 
             q = torch.min(
-                self._critic_1(states, actions), self._critic_2(states, actions)
+                self._critic_1(states, actions),
+                self._critic_2(states, actions),
             )
             adv = q - v
             weights = torch.clamp_max(
@@ -281,7 +312,9 @@ class AdvantageWeightedActorCritic:
 
     def update(self, batch: TensorBatch) -> Dict[str, float]:
         states, actions, rewards, next_states, dones = batch
-        critic_loss = self._update_critic(states, actions, rewards, dones, next_states)
+        critic_loss = self._update_critic(
+            states, actions, rewards, dones, next_states
+        )
         actor_loss = self._update_actor(states, actions)
 
         soft_update(self._target_critic_1, self._critic_1, self._tau)
@@ -316,7 +349,9 @@ def set_seed(
     torch.use_deterministic_algorithms(deterministic_torch)
 
 
-def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
+def compute_mean_std(
+    states: np.ndarray, eps: float
+) -> Tuple[np.ndarray, np.ndarray]:
     mean = states.mean(0)
     std = states.std(0) + eps
     return mean, std
@@ -428,13 +463,19 @@ def train(config: TrainConfig):
 
     actor = Actor(**actor_critic_kwargs)
     actor.to(config.device)
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.learning_rate)
+    actor_optimizer = torch.optim.Adam(
+        actor.parameters(), lr=config.learning_rate
+    )
     critic_1 = Critic(**actor_critic_kwargs)
     critic_2 = Critic(**actor_critic_kwargs)
     critic_1.to(config.device)
     critic_2.to(config.device)
-    critic_1_optimizer = torch.optim.Adam(critic_1.parameters(), lr=config.learning_rate)
-    critic_2_optimizer = torch.optim.Adam(critic_2.parameters(), lr=config.learning_rate)
+    critic_1_optimizer = torch.optim.Adam(
+        critic_1.parameters(), lr=config.learning_rate
+    )
+    critic_2_optimizer = torch.optim.Adam(
+        critic_2.parameters(), lr=config.learning_rate
+    )
 
     awac = AdvantageWeightedActorCritic(
         actor=actor,
@@ -452,7 +493,9 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
+        with open(
+            os.path.join(config.checkpoints_path, "config.yaml"), "w"
+        ) as f:
             pyrallis.dump(config, f)
 
     full_eval_scores, full_normalized_eval_scores = [], []
@@ -463,28 +506,40 @@ def train(config: TrainConfig):
         wandb.log(update_result, step=t)
         if (t + 1) % config.eval_frequency == 0:
             eval_scores = eval_actor(
-                env, actor, config.device, config.n_test_episodes, config.test_seed
+                env,
+                actor,
+                config.device,
+                config.n_test_episodes,
+                config.test_seed,
             )
             full_eval_scores.append(eval_scores)
             wandb.log({"eval_score": eval_scores.mean()}, step=t)
             if hasattr(env, "get_normalized_score"):
-                normalized_eval_scores = env.get_normalized_score(eval_scores) * 100.0
+                normalized_eval_scores = (
+                    env.get_normalized_score(eval_scores) * 100.0
+                )
                 full_normalized_eval_scores.append(normalized_eval_scores)
                 wandb.log(
-                    {"normalized_eval_score": normalized_eval_scores.mean()}, step=t
+                    {"normalized_eval_score": normalized_eval_scores.mean()},
+                    step=t,
                 )
             torch.save(
                 awac.state_dict(),
                 os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
             )
 
-    with open(os.path.join(config.checkpoints_path, "/eval_scores.npy"), "wb") as f:
+    with open(
+        os.path.join(config.checkpoints_path, "/eval_scores.npy"), "wb"
+    ) as f:
         # noinspection PyTypeChecker
         np.save(f, np.asarray(full_eval_scores))
 
     if len(full_normalized_eval_scores) > 0:
         with open(
-            os.path.join(config.checkpoints_path, "/normalized_eval_scores.npy"), "wb"
+            os.path.join(
+                config.checkpoints_path, "/normalized_eval_scores.npy"
+            ),
+            "wb",
         ) as f:
             # noinspection PyTypeChecker
             np.save(f, np.asarray(full_normalized_eval_scores))

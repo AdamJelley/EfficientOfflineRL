@@ -15,7 +15,6 @@ import torch
 from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
-
 import wandb
 
 TensorBatch = List[torch.Tensor]
@@ -28,7 +27,7 @@ class TrainConfig:
     env: str = "halfcheetah-medium-expert-v2"  # OpenAI gym environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
     eval_freq: int = int(5e3)  # How often (time steps) we evaluate
-    log_every: int = 100 # How often (time steps) we log
+    log_every: int = 100  # How often (time steps) we log
     n_episodes: int = 10  # How many episodes run during evaluation
     max_timesteps: int = int(1e6)  # Max time steps to run environment
     checkpoints_path: Optional[str] = None  # Save path
@@ -48,18 +47,26 @@ class TrainConfig:
     name: str = "BC"
 
     def __post_init__(self):
-        self.name = f"{self.name}-{self.env}"#{str(uuid.uuid4())[:8]}
+        self.name = f"{self.name}-{self.env}"  # {str(uuid.uuid4())[:8]}
         if self.checkpoints_path is not None:
-            time=datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
-            self.checkpoints_path = os.path.join(self.checkpoints_path, f"{time}_{self.name}")
+            time = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+            self.checkpoints_path = os.path.join(
+                self.checkpoints_path, f"{time}_{self.name}"
+            )
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
-    for target_param, source_param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
+    for target_param, source_param in zip(
+        target.parameters(), source.parameters()
+    ):
+        target_param.data.copy_(
+            (1 - tau) * target_param.data + tau * source_param.data
+        )
 
 
-def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
+def compute_mean_std(
+    states: np.ndarray, eps: float
+) -> Tuple[np.ndarray, np.ndarray]:
     mean = states.mean(0)
     std = states.std(0) + eps
     return mean, std
@@ -109,11 +116,15 @@ class ReplayBuffer:
         self._actions = torch.zeros(
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
-        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._rewards = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
-        self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._dones = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
@@ -122,7 +133,9 @@ class ReplayBuffer:
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
-            raise ValueError("Trying to load data into non-empty replay buffer")
+            raise ValueError(
+                "Trying to load data into non-empty replay buffer"
+            )
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
             raise ValueError(
@@ -130,16 +143,24 @@ class ReplayBuffer:
             )
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
-        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._rewards[:n_transitions] = self._to_tensor(
+            data["rewards"][..., None]
+        )
+        self._next_states[:n_transitions] = self._to_tensor(
+            data["next_observations"]
+        )
+        self._dones[:n_transitions] = self._to_tensor(
+            data["terminals"][..., None]
+        )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
-        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
+        indices = np.random.randint(
+            0, min(self._size, self._pointer), size=batch_size
+        )
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
@@ -186,7 +207,12 @@ def eval_actor(
     episode_rewards = []
     # Max demonstration lengths for each environment from human data (described in Appendix H of paper)
     # TODO: Create env wrapper for harcoded truncation fix below for code release
-    max_demonstration_lengths = {'pen': 100, 'door': 300, 'hammer': 624, 'relocate': 527}
+    max_demonstration_lengths = {
+        "pen": 100,
+        "door": 300,
+        "hammer": 624,
+        "relocate": 527,
+    }
     max_demonstration_length = None
     for s in max_demonstration_lengths.keys():
         if s in env.spec.id:
@@ -194,13 +220,16 @@ def eval_actor(
     for _ in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
-        timestep=0
+        timestep = 0
         while not done:
             action = actor.act(state, device)
             state, reward, done, _ = env.step(action)
-            timestep+=1
+            timestep += 1
             episode_reward += reward
-            if max_demonstration_length is not None and timestep < max_demonstration_length:
+            if (
+                max_demonstration_length is not None
+                and timestep < max_demonstration_length
+            ):
                 done = False
         episode_rewards.append(episode_reward)
 
@@ -219,7 +248,9 @@ def keep_best_trajectories(
     cur_ids = []
     cur_return = 0
     reward_scale = 1.0
-    for i, (reward, done) in enumerate(zip(dataset["rewards"], dataset["terminals"])):
+    for i, (reward, done) in enumerate(
+        zip(dataset["rewards"], dataset["terminals"])
+    ):
         cur_return += reward_scale * reward
         cur_ids.append(i)
         reward_scale *= discount
@@ -260,13 +291,19 @@ class Actor(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(state_dim, 256),
-            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
+            nn.LayerNorm(256, elementwise_affine=False)
+            if actor_LN
+            else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, 256),
-            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
+            nn.LayerNorm(256, elementwise_affine=False)
+            if actor_LN
+            else nn.Identity(),
             nn.ReLU(),
             nn.Linear(256, 256),
-            nn.LayerNorm(256, elementwise_affine=False) if actor_LN else nn.Identity(),
+            nn.LayerNorm(256, elementwise_affine=False)
+            if actor_LN
+            else nn.Identity(),
             nn.ReLU(),
             # nn.Linear(256, action_dim),
             # nn.Tanh(),
@@ -276,7 +313,9 @@ class Actor(nn.Module):
 
         self.max_action = max_action
 
-    def forward(self, state: torch.Tensor, deterministic=False) -> torch.Tensor:
+    def forward(
+        self, state: torch.Tensor, deterministic=False
+    ) -> torch.Tensor:
         if self.soft:
             hidden = self.net(state)
             mu = self.mu(hidden)
@@ -291,9 +330,9 @@ class Actor(nn.Module):
                 tanh_action = torch.tanh(action)
                 # change of variables formula (SAC paper, appendix C, eq 21)
                 log_prob = policy_dist.log_prob(action).sum(axis=-1)
-                log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(
-                    axis=-1
-                )
+                log_prob = log_prob - torch.log(
+                    1 - tanh_action.pow(2) + 1e-6
+                ).sum(axis=-1)
                 scaled_action = self.max_action * tanh_action
         else:
             hidden = self.net(state)
@@ -301,20 +340,26 @@ class Actor(nn.Module):
             log_prob = None
         return scaled_action, log_prob
 
-    def log_prob(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def log_prob(
+        self, state: torch.Tensor, action: torch.Tensor
+    ) -> torch.Tensor:
         hidden = self.net(state)
         mu = self.mu(hidden)
         log_sigma = self.log_sigma(hidden)
         log_sigma = torch.clip(log_sigma, -5, 2)
         policy_dist = Normal(mu, torch.exp(log_sigma))
-        action = torch.clip(action, -self.max_action + 1e-6, self.max_action - 1e-6)
+        action = torch.clip(
+            action, -self.max_action + 1e-6, self.max_action - 1e-6
+        )
         log_prob = policy_dist.log_prob(torch.arctanh(action)).sum(axis=-1)
         log_prob = log_prob - torch.log(1 - action.pow(2) + 1e-6).sum(axis=-1)
         return log_prob
 
     @torch.no_grad()
     def act(self, state: np.ndarray, device: str = "cpu") -> np.ndarray:
-        state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
+        state = torch.tensor(
+            state.reshape(1, -1), device=device, dtype=torch.float32
+        )
         return self(state, deterministic=True)[0].cpu().data.numpy().flatten()
 
 
@@ -347,7 +392,9 @@ class BC:  # noqa
         with torch.no_grad():
             action, action_log_prob = self.actor(state)
 
-        loss = (-self.log_alpha * (action_log_prob + self.target_entropy)).mean()
+        loss = (
+            -self.log_alpha * (action_log_prob + self.target_entropy)
+        ).mean()
 
         return loss
 
@@ -406,7 +453,9 @@ def train(config: TrainConfig):
         keep_best_trajectories(dataset, config.frac, config.discount)
 
     if config.normalize:
-        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-3)
+        state_mean, state_std = compute_mean_std(
+            dataset["observations"], eps=1e-3
+        )
     else:
         state_mean, state_std = 0, 1
 
@@ -414,7 +463,9 @@ def train(config: TrainConfig):
         dataset["next_observations"] = np.roll(
             dataset["observations"], shift=-1, axis=0
         )  # Terminals/timeouts block next observations
-        print("Loaded next state observations from current state observations.")
+        print(
+            "Loaded next state observations from current state observations."
+        )
 
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
@@ -434,7 +485,9 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
+        with open(
+            os.path.join(config.checkpoints_path, "config.yaml"), "w"
+        ) as f:
             pyrallis.dump(config, f)
 
     max_action = float(env.action_space.high[0])
@@ -443,9 +496,9 @@ def train(config: TrainConfig):
     seed = config.seed
     set_seed(seed, env)
 
-    actor = Actor(state_dim, action_dim, max_action, config.actor_LN, config.soft).to(
-        config.device
-    )
+    actor = Actor(
+        state_dim, action_dim, max_action, config.actor_LN, config.soft
+    ).to(config.device)
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=3e-4)
 
     kwargs = {
@@ -491,12 +544,18 @@ def train(config: TrainConfig):
             eval_log = {
                 "eval/reward_mean": np.mean(eval_returns),
                 "eval/reward_std": np.std(eval_returns),
-                "epoch": int((t+1)/1000),
+                "epoch": int((t + 1) / 1000),
             }
             if hasattr(env, "get_normalized_score"):
-                normalized_score = env.get_normalized_score(eval_returns) * 100.0
-                eval_log["eval/normalized_score_mean"] = np.mean(normalized_score)
-                eval_log["eval/normalized_score_std"] = np.std(normalized_score)
+                normalized_score = (
+                    env.get_normalized_score(eval_returns) * 100.0
+                )
+                eval_log["eval/normalized_score_mean"] = np.mean(
+                    normalized_score
+                )
+                eval_log["eval/normalized_score_std"] = np.std(
+                    normalized_score
+                )
 
             wandb.log(eval_log)
             print("---------------------------------------")
@@ -508,18 +567,44 @@ def train(config: TrainConfig):
             if config.checkpoints_path is not None:
                 torch.save(
                     trainer.state_dict(),
-                    os.path.join(config.checkpoints_path, f"checkpoint_{int((t+1)/1000)}.pt"),
+                    os.path.join(
+                        config.checkpoints_path,
+                        f"checkpoint_{int((t+1)/1000)}.pt",
+                    ),
                 )
-                checkpoints = [os.path.join(config.checkpoints_path, file) for file in os.listdir(config.checkpoints_path) if os.path.splitext(file)[-1]=='.pt']
+                checkpoints = [
+                    os.path.join(config.checkpoints_path, file)
+                    for file in os.listdir(config.checkpoints_path)
+                    if os.path.splitext(file)[-1] == ".pt"
+                ]
                 checkpoints.sort(key=os.path.getmtime)
                 if len(checkpoints) > 10:
                     oldest_checkpoint = checkpoints.pop(0)
                     os.remove(oldest_checkpoint)
-                df = pd.DataFrame({"epoch": int((t+1)/1000), "return_mean": np.mean(eval_returns), "return_std": np.std(eval_returns), "normalized_score_mean": np.mean(normalized_score), "normalized_score_std": np.std(normalized_score)}, index=[0])
-                if not os.path.exists(os.path.join(config.checkpoints_path, "results.csv")):
-                    df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), index=False)
+                df = pd.DataFrame(
+                    {
+                        "epoch": int((t + 1) / 1000),
+                        "return_mean": np.mean(eval_returns),
+                        "return_std": np.std(eval_returns),
+                        "normalized_score_mean": np.mean(normalized_score),
+                        "normalized_score_std": np.std(normalized_score),
+                    },
+                    index=[0],
+                )
+                if not os.path.exists(
+                    os.path.join(config.checkpoints_path, "results.csv")
+                ):
+                    df.to_csv(
+                        os.path.join(config.checkpoints_path, "results.csv"),
+                        index=False,
+                    )
                 else:
-                    df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), mode='a', header=False, index=False)
+                    df.to_csv(
+                        os.path.join(config.checkpoints_path, "results.csv"),
+                        mode="a",
+                        header=False,
+                        index=False,
+                    )
 
 
 if __name__ == "__main__":

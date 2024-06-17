@@ -17,7 +17,6 @@ from torch.distributions import MultivariateNormal
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
-
 import wandb
 
 TensorBatch = List[torch.Tensor]
@@ -44,7 +43,9 @@ class TrainConfig:
     batch_size: int = 256  # Batch size for all networks
     discount: float = 0.99  # Discount factor
     tau: float = 0.005  # Target network update rate
-    beta: float = 3.0  # Inverse temperature. Small beta -> BC, big beta -> maximizing Q
+    beta: float = (
+        3.0  # Inverse temperature. Small beta -> BC, big beta -> maximizing Q
+    )
     iql_tau: float = 0.7  # Coefficient for asymmetric loss
     iql_deterministic: bool = False  # Use deterministic actor
     normalize: bool = True  # Normalize states
@@ -57,15 +58,23 @@ class TrainConfig:
     def __post_init__(self):
         self.name = f"{self.name}-{self.env}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
+            self.checkpoints_path = os.path.join(
+                self.checkpoints_path, self.name
+            )
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
-    for target_param, source_param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
+    for target_param, source_param in zip(
+        target.parameters(), source.parameters()
+    ):
+        target_param.data.copy_(
+            (1 - tau) * target_param.data + tau * source_param.data
+        )
 
 
-def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
+def compute_mean_std(
+    states: np.ndarray, eps: float
+) -> Tuple[np.ndarray, np.ndarray]:
     mean = states.mean(0)
     std = states.std(0) + eps
     return mean, std
@@ -115,11 +124,15 @@ class ReplayBuffer:
         self._actions = torch.zeros(
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
-        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._rewards = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
-        self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._dones = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
@@ -128,7 +141,9 @@ class ReplayBuffer:
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
-            raise ValueError("Trying to load data into non-empty replay buffer")
+            raise ValueError(
+                "Trying to load data into non-empty replay buffer"
+            )
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
             raise ValueError(
@@ -136,16 +151,24 @@ class ReplayBuffer:
             )
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
-        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._rewards[:n_transitions] = self._to_tensor(
+            data["rewards"][..., None]
+        )
+        self._next_states[:n_transitions] = self._to_tensor(
+            data["next_observations"]
+        )
+        self._dones[:n_transitions] = self._to_tensor(
+            data["terminals"][..., None]
+        )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
-        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
+        indices = np.random.randint(
+            0, min(self._size, self._pointer), size=batch_size
+        )
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
@@ -251,7 +274,9 @@ class MLP(nn.Module):
         super().__init__()
         n_dims = len(dims)
         if n_dims < 2:
-            raise ValueError("MLP requires at least two dims (input and output)")
+            raise ValueError(
+                "MLP requires at least two dims (input and output)"
+            )
 
         layers = []
         for i in range(n_dims - 2):
@@ -292,10 +317,14 @@ class GaussianPolicy(nn.Module):
 
     @torch.no_grad()
     def act(self, state: np.ndarray, device: str = "cpu"):
-        state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
+        state = torch.tensor(
+            state.reshape(1, -1), device=device, dtype=torch.float32
+        )
         dist = self(state)
         action = dist.mean if not self.training else dist.sample()
-        action = torch.clamp(self.max_action * action, -self.max_action, self.max_action)
+        action = torch.clamp(
+            self.max_action * action, -self.max_action, self.max_action
+        )
         return action.cpu().data.numpy().flatten()
 
 
@@ -320,9 +349,15 @@ class DeterministicPolicy(nn.Module):
 
     @torch.no_grad()
     def act(self, state: np.ndarray, device: str = "cpu"):
-        state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
+        state = torch.tensor(
+            state.reshape(1, -1), device=device, dtype=torch.float32
+        )
         return (
-            torch.clamp(self(state) * self.max_action, -self.max_action, self.max_action)
+            torch.clamp(
+                self(state) * self.max_action,
+                -self.max_action,
+                self.max_action,
+            )
             .cpu()
             .data.numpy()
             .flatten()
@@ -331,7 +366,11 @@ class DeterministicPolicy(nn.Module):
 
 class TwinQ(nn.Module):
     def __init__(
-        self, state_dim: int, action_dim: int, hidden_dim: int = 256, n_hidden: int = 2
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dim: int = 256,
+        n_hidden: int = 2,
     ):
         super().__init__()
         dims = [state_dim + action_dim, *([hidden_dim] * n_hidden), 1]
@@ -344,12 +383,16 @@ class TwinQ(nn.Module):
         sa = torch.cat([state, action], 1)
         return self.q1(sa), self.q2(sa)
 
-    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, state: torch.Tensor, action: torch.Tensor
+    ) -> torch.Tensor:
         return torch.min(*self.both(state, action))
 
 
 class ValueFunction(nn.Module):
-    def __init__(self, state_dim: int, hidden_dim: int = 256, n_hidden: int = 2):
+    def __init__(
+        self, state_dim: int, hidden_dim: int = 256, n_hidden: int = 2
+    ):
         super().__init__()
         dims = [state_dim, *([hidden_dim] * n_hidden), 1]
         self.v = MLP(dims, squeeze_output=True)
@@ -383,7 +426,9 @@ class ImplicitQLearning:
         self.v_optimizer = v_optimizer
         self.q_optimizer = q_optimizer
         self.actor_optimizer = actor_optimizer
-        self.actor_lr_schedule = CosineAnnealingLR(self.actor_optimizer, max_steps)
+        self.actor_lr_schedule = CosineAnnealingLR(
+            self.actor_optimizer, max_steps
+        )
         self.iql_tau = iql_tau
         self.beta = beta
         self.discount = discount
@@ -415,7 +460,10 @@ class ImplicitQLearning:
         terminals,
         log_dict,
     ):
-        targets = rewards + (1.0 - terminals.float()) * self.discount * next_v.detach()
+        targets = (
+            rewards
+            + (1.0 - terminals.float()) * self.discount * next_v.detach()
+        )
         qs = self.qf.both(observations, actions)
         q_loss = sum(F.mse_loss(q, targets) for q in qs) / len(qs)
         log_dict["q_loss"] = q_loss.item()
@@ -508,7 +556,9 @@ def train(config: TrainConfig):
         modify_reward(dataset, config.env)
 
     if config.normalize:
-        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-3)
+        state_mean, state_std = compute_mean_std(
+            dataset["observations"], eps=1e-3
+        )
     else:
         state_mean, state_std = 0, 1
 
@@ -532,7 +582,9 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
+        with open(
+            os.path.join(config.checkpoints_path, "config.yaml"), "w"
+        ) as f:
             pyrallis.dump(config, f)
 
     # Set seeds
@@ -598,7 +650,9 @@ def train(config: TrainConfig):
                 seed=config.seed,
             )
             eval_score = eval_scores.mean()
-            normalized_eval_score = env.get_normalized_score(eval_score) * 100.0
+            normalized_eval_score = (
+                env.get_normalized_score(eval_score) * 100.0
+            )
             evaluations.append(normalized_eval_score)
             print("---------------------------------------")
             print(
@@ -609,10 +663,13 @@ def train(config: TrainConfig):
             if config.checkpoints_path is not None:
                 torch.save(
                     trainer.state_dict(),
-                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                    os.path.join(
+                        config.checkpoints_path, f"checkpoint_{t}.pt"
+                    ),
                 )
             wandb.log(
-                {"d4rl_normalized_score": normalized_eval_score}, step=trainer.total_it
+                {"d4rl_normalized_score": normalized_eval_score},
+                step=trainer.total_it,
             )
 
 

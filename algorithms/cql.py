@@ -19,7 +19,6 @@ import torch
 from torch.distributions import Normal, TanhTransform, TransformedDistribution
 import torch.nn as nn
 import torch.nn.functional as F
-
 import wandb
 
 TensorBatch = List[torch.Tensor]
@@ -68,18 +67,26 @@ class TrainConfig:
     name: str = "CQL"
 
     def __post_init__(self):
-        self.name = f"{self.name}-{self.env}"#{str(uuid.uuid4())[:8]}
+        self.name = f"{self.name}-{self.env}"  # {str(uuid.uuid4())[:8]}
         if self.checkpoints_path is not None:
-            time=datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
-            self.checkpoints_path = os.path.join(self.checkpoints_path, f"{time}_{self.name}")
+            time = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+            self.checkpoints_path = os.path.join(
+                self.checkpoints_path, f"{time}_{self.name}"
+            )
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
-    for target_param, source_param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
+    for target_param, source_param in zip(
+        target.parameters(), source.parameters()
+    ):
+        target_param.data.copy_(
+            (1 - tau) * target_param.data + tau * source_param.data
+        )
 
 
-def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
+def compute_mean_std(
+    states: np.ndarray, eps: float
+) -> Tuple[np.ndarray, np.ndarray]:
     mean = states.mean(0)
     std = states.std(0) + eps
     return mean, std
@@ -98,7 +105,9 @@ def discount_cumsum(x, discount, include_first=True):
     else:
         disc_cumsum[-1] = 0
         for t in reversed(range(x.shape[0] - 1)):
-            disc_cumsum[t] = discount * x[t + 1] + discount * disc_cumsum[t + 1]
+            disc_cumsum[t] = (
+                discount * x[t + 1] + discount * disc_cumsum[t + 1]
+            )
     return disc_cumsum
 
 
@@ -143,7 +152,9 @@ class ReplayBuffer:
         self._actions = torch.zeros(
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
-        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._rewards = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._returns_to_go = torch.zeros(
             (buffer_size, 1), dtype=torch.float32, device=device
         )
@@ -162,7 +173,9 @@ class ReplayBuffer:
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
-        self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._dones = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._discount = discount
         self._device = device
 
@@ -179,7 +192,9 @@ class ReplayBuffer:
                 data["rewards"][i]
             )  # - 1* self._action_dim* torch.log(1 / torch.sqrt(torch.tensor(2 * np.pi))))
             if (
-                data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1
+                data["terminals"][i]
+                or data["timeouts"][i]
+                or i == n_transitions - 1
             ):  # TODO: Deal with incomplete trajectory case
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
@@ -200,7 +215,9 @@ class ReplayBuffer:
         )  # Terminals/timeouts block next returns to go
         assert next_returns_to_go[0] == returns_to_go[1]
 
-        self._returns_to_go[:n_transitions] = self._to_tensor(returns_to_go[..., None])
+        self._returns_to_go[:n_transitions] = self._to_tensor(
+            returns_to_go[..., None]
+        )
         self._next_returns_to_go[:n_transitions] = self._to_tensor(
             next_returns_to_go[..., None]
         )
@@ -231,7 +248,9 @@ class ReplayBuffer:
 
         for i in range(n_transitions):
             episode_rewards.append(self._rewards[i].cpu().item())
-            episode_entropy_bonuses.append(self._entropy_bonuses[i].cpu().item())
+            episode_entropy_bonuses.append(
+                self._entropy_bonuses[i].cpu().item()
+            )
             if self._dones[i] or i == n_transitions - 1:
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
@@ -268,7 +287,9 @@ class ReplayBuffer:
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
-            raise ValueError("Trying to load data into non-empty replay buffer")
+            raise ValueError(
+                "Trying to load data into non-empty replay buffer"
+            )
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
             raise ValueError(
@@ -276,9 +297,15 @@ class ReplayBuffer:
             )
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
-        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._rewards[:n_transitions] = self._to_tensor(
+            data["rewards"][..., None]
+        )
+        self._next_states[:n_transitions] = self._to_tensor(
+            data["next_observations"]
+        )
+        self._dones[:n_transitions] = self._to_tensor(
+            data["terminals"][..., None]
+        )
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
@@ -288,7 +315,9 @@ class ReplayBuffer:
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
-        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
+        indices = np.random.randint(
+            0, min(self._size, self._pointer), size=batch_size
+        )
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
@@ -349,7 +378,12 @@ def eval_actor(
     episode_rewards = []
     # Max demonstration lengths for each environment from human data (described in Appendix H of paper)
     # TODO: Create env wrapper for harcoded truncation fix below for code release
-    max_demonstration_lengths = {'pen': 100, 'door': 300, 'hammer': 624, 'relocate': 527}
+    max_demonstration_lengths = {
+        "pen": 100,
+        "door": 300,
+        "hammer": 624,
+        "relocate": 527,
+    }
     max_demonstration_length = None
     for s in max_demonstration_lengths.keys():
         if s in env.spec.id:
@@ -361,9 +395,12 @@ def eval_actor(
         while not done:
             action = actor.act(state, device)
             state, reward, done, _ = env.step(action)
-            timestep+=1
+            timestep += 1
             episode_reward += reward
-            if max_demonstration_length is not None and timestep < max_demonstration_length:
+            if (
+                max_demonstration_length is not None
+                and timestep < max_demonstration_length
+            ):
                 done = False
         episode_rewards.append(episode_reward)
 
@@ -395,11 +432,15 @@ def modify_reward(dataset, env_name, max_episode_steps=1000):
         dataset["rewards"] -= 1.0
 
 
-def extend_and_repeat(tensor: torch.Tensor, dim: int, repeat: int) -> torch.Tensor:
+def extend_and_repeat(
+    tensor: torch.Tensor, dim: int, repeat: int
+) -> torch.Tensor:
     return tensor.unsqueeze(dim).repeat_interleave(repeat, dim=dim)
 
 
-def init_module_weights(module: torch.nn.Module, orthogonal_init: bool = False):
+def init_module_weights(
+    module: torch.nn.Module, orthogonal_init: bool = False
+):
     if isinstance(module, nn.Linear):
         if orthogonal_init:
             nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
@@ -410,7 +451,10 @@ def init_module_weights(module: torch.nn.Module, orthogonal_init: bool = False):
 
 class ReparameterizedTanhGaussian(nn.Module):
     def __init__(
-        self, log_std_min: float = -20.0, log_std_max: float = 2.0, no_tanh: bool = False
+        self,
+        log_std_min: float = -20.0,
+        log_std_max: float = 2.0,
+        no_tanh: bool = False,
     ):
         super().__init__()
         self.log_std_min = log_std_min
@@ -431,7 +475,10 @@ class ReparameterizedTanhGaussian(nn.Module):
         return torch.sum(action_distribution.log_prob(sample), dim=-1)
 
     def forward(
-        self, mean: torch.Tensor, log_std: torch.Tensor, deterministic: bool = False
+        self,
+        mean: torch.Tensor,
+        log_std: torch.Tensor,
+        deterministic: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         std = torch.exp(log_std)
@@ -448,7 +495,9 @@ class ReparameterizedTanhGaussian(nn.Module):
         else:
             action_sample = action_distribution.rsample()
 
-        log_prob = torch.sum(action_distribution.log_prob(action_sample), dim=-1)
+        log_prob = torch.sum(
+            action_distribution.log_prob(action_sample), dim=-1
+        )
 
         return action_sample, log_prob
 
@@ -496,11 +545,15 @@ class TanhGaussianPolicy(nn.Module):
     def log_prob(
         self, observations: torch.Tensor, actions: torch.Tensor
     ) -> torch.Tensor:
-        actions = torch.clip(actions, -self.max_action + 1e-6, self.max_action - 1e-6)
+        actions = torch.clip(
+            actions, -self.max_action + 1e-6, self.max_action - 1e-6
+        )
         if actions.ndim == 3:
             observations = extend_and_repeat(observations, 1, actions.shape[1])
         base_network_output = self.base_network(observations)
-        mean, log_std = torch.split(base_network_output, self.action_dim, dim=-1)
+        mean, log_std = torch.split(
+            base_network_output, self.action_dim, dim=-1
+        )
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
         return self.tanh_gaussian.log_prob(mean, log_std, actions)
 
@@ -513,14 +566,18 @@ class TanhGaussianPolicy(nn.Module):
         if repeat is not None:
             observations = extend_and_repeat(observations, 1, repeat)
         base_network_output = self.base_network(observations)
-        mean, log_std = torch.split(base_network_output, self.action_dim, dim=-1)
+        mean, log_std = torch.split(
+            base_network_output, self.action_dim, dim=-1
+        )
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
         actions, log_probs = self.tanh_gaussian(mean, log_std, deterministic)
         return self.max_action * actions, log_probs
 
     @torch.no_grad()
     def act(self, state: np.ndarray, device: str = "cpu"):
-        state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
+        state = torch.tensor(
+            state.reshape(1, -1), device=device, dtype=torch.float32
+        )
         with torch.no_grad():
             actions, _ = self(state, not self.training)
         return actions.cpu().data.numpy().flatten()
@@ -555,14 +612,16 @@ class FullyConnectedQFunction(nn.Module):
         else:
             init_module_weights(self.network[-1], False)
 
-    def forward(self, observations: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, observations: torch.Tensor, actions: torch.Tensor
+    ) -> torch.Tensor:
         multiple_actions = False
         batch_size = observations.shape[0]
         if actions.ndim == 3 and observations.ndim == 2:
             multiple_actions = True
-            observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(
-                -1, observations.shape[-1]
-            )
+            observations = extend_and_repeat(
+                observations, 1, actions.shape[1]
+            ).reshape(-1, observations.shape[-1])
             actions = actions.reshape(-1, actions.shape[-1])
         input_tensor = torch.cat([observations, actions], dim=-1)
         q_values = torch.squeeze(self.network(input_tensor), dim=-1)
@@ -574,7 +633,9 @@ class FullyConnectedQFunction(nn.Module):
 class Scalar(nn.Module):
     def __init__(self, init_value: float):
         super().__init__()
-        self.constant = nn.Parameter(torch.tensor(init_value, dtype=torch.float32))
+        self.constant = nn.Parameter(
+            torch.tensor(init_value, dtype=torch.float32)
+        )
 
     def forward(self) -> nn.Parameter:
         return self.constant
@@ -666,10 +727,16 @@ class ContinuousCQL:
         self.total_it = 0
 
     def update_target_network(self, soft_target_update_rate: float):
-        soft_update(self.target_critic_1, self.critic_1, soft_target_update_rate)
-        soft_update(self.target_critic_2, self.critic_2, soft_target_update_rate)
+        soft_update(
+            self.target_critic_1, self.critic_1, soft_target_update_rate
+        )
+        soft_update(
+            self.target_critic_2, self.critic_2, soft_target_update_rate
+        )
 
-    def _alpha_and_alpha_loss(self, observations: torch.Tensor, log_pi: torch.Tensor):
+    def _alpha_and_alpha_loss(
+        self, observations: torch.Tensor, log_pi: torch.Tensor
+    ):
         if self.use_automatic_entropy_tuning:
             alpha_loss = -(
                 self.log_alpha() * (log_pi + self.target_entropy).detach()
@@ -701,7 +768,14 @@ class ContinuousCQL:
         return policy_loss
 
     def _q_loss(
-        self, observations, actions, next_observations, rewards, dones, alpha, log_dict
+        self,
+        observations,
+        actions,
+        next_observations,
+        rewards,
+        dones,
+        alpha,
+        log_dict,
     ):
         q1_predicted = self.critic_1(observations, actions)
         q2_predicted = self.critic_2(observations, actions)
@@ -759,8 +833,12 @@ class ContinuousCQL:
 
         cql_q1_rand = self.critic_1(observations, cql_random_actions)
         cql_q2_rand = self.critic_2(observations, cql_random_actions)
-        cql_q1_current_actions = self.critic_1(observations, cql_current_actions)
-        cql_q2_current_actions = self.critic_2(observations, cql_current_actions)
+        cql_q1_current_actions = self.critic_1(
+            observations, cql_current_actions
+        )
+        cql_q2_current_actions = self.critic_2(
+            observations, cql_current_actions
+        )
         cql_q1_next_actions = self.critic_1(observations, cql_next_actions)
         cql_q2_next_actions = self.critic_2(observations, cql_next_actions)
 
@@ -804,8 +882,12 @@ class ContinuousCQL:
                 dim=1,
             )
 
-        cql_qf1_ood = torch.logsumexp(cql_cat_q1 / self.cql_temp, dim=1) * self.cql_temp
-        cql_qf2_ood = torch.logsumexp(cql_cat_q2 / self.cql_temp, dim=1) * self.cql_temp
+        cql_qf1_ood = (
+            torch.logsumexp(cql_cat_q1 / self.cql_temp, dim=1) * self.cql_temp
+        )
+        cql_qf2_ood = (
+            torch.logsumexp(cql_cat_q2 / self.cql_temp, dim=1) * self.cql_temp
+        )
 
         """Subtract the log likelihood of data"""
         cql_qf1_diff = torch.clamp(
@@ -935,11 +1017,16 @@ class ContinuousCQL:
             next_action, next_log_prob = self.actor(next_observations)
 
             q_next = (
-                next_return_to_go - self.log_alpha().exp() * next_log_prob.unsqueeze(-1)
+                next_return_to_go
+                - self.log_alpha().exp() * next_log_prob.unsqueeze(-1)
             )
-            q_target = (rewards + self.discount * (1 - dones) * q_next).squeeze(-1)
+            q_target = (
+                rewards + self.discount * (1 - dones) * q_next
+            ).squeeze(-1)
 
-        qf_loss = F.mse_loss(q1_values, q_target) + F.mse_loss(q2_values, q_target)
+        qf_loss = F.mse_loss(q1_values, q_target) + F.mse_loss(
+            q2_values, q_target
+        )
 
         log_dict = dict(
             qf_loss=qf_loss.item(),
@@ -987,7 +1074,13 @@ class ContinuousCQL:
 
         """ Q function loss """
         qf_loss, alpha_prime, alpha_prime_loss = self._q_loss(
-            observations, actions, next_observations, rewards, dones, alpha, log_dict
+            observations,
+            actions,
+            next_observations,
+            rewards,
+            dones,
+            alpha,
+            log_dict,
         )
 
         if self.use_automatic_entropy_tuning:
@@ -1032,8 +1125,12 @@ class ContinuousCQL:
         self.critic_1.load_state_dict(state_dict=state_dict["critic1"])
         self.critic_2.load_state_dict(state_dict=state_dict["critic2"])
 
-        self.target_critic_1.load_state_dict(state_dict=state_dict["critic1_target"])
-        self.target_critic_2.load_state_dict(state_dict=state_dict["critic2_target"])
+        self.target_critic_1.load_state_dict(
+            state_dict=state_dict["critic1_target"]
+        )
+        self.target_critic_2.load_state_dict(
+            state_dict=state_dict["critic2_target"]
+        )
 
         self.critic_1_optimizer.load_state_dict(
             state_dict=state_dict["critic_1_optimizer"]
@@ -1041,7 +1138,9 @@ class ContinuousCQL:
         self.critic_2_optimizer.load_state_dict(
             state_dict=state_dict["critic_2_optimizer"]
         )
-        self.actor_optimizer.load_state_dict(state_dict=state_dict["actor_optim"])
+        self.actor_optimizer.load_state_dict(
+            state_dict=state_dict["actor_optim"]
+        )
 
         self.log_alpha = state_dict["sac_log_alpha"]
         self.alpha_optimizer.load_state_dict(
@@ -1068,7 +1167,9 @@ def train(config: TrainConfig):
         modify_reward(dataset, config.env)
 
     if config.normalize:
-        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-3)
+        state_mean, state_std = compute_mean_std(
+            dataset["observations"], eps=1e-3
+        )
     else:
         state_mean, state_std = 0, 1
 
@@ -1076,7 +1177,9 @@ def train(config: TrainConfig):
         dataset["next_observations"] = np.roll(
             dataset["observations"], shift=-1, axis=0
         )  # Terminals/timeouts block next observations
-        print("Loaded next state observations from current state observations.")
+        print(
+            "Loaded next state observations from current state observations."
+        )
 
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
@@ -1099,24 +1202,33 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
+        with open(
+            os.path.join(config.checkpoints_path, "config.yaml"), "w"
+        ) as f:
             pyrallis.dump(config, f)
 
     # Set seeds
     seed = config.seed
     set_seed(seed, env)
 
-    critic_1 = FullyConnectedQFunction(state_dim, action_dim, config.orthogonal_init).to(
-        config.device
+    critic_1 = FullyConnectedQFunction(
+        state_dim, action_dim, config.orthogonal_init
+    ).to(config.device)
+    critic_2 = FullyConnectedQFunction(
+        state_dim, action_dim, config.orthogonal_init
+    ).to(config.device)
+    critic_1_optimizer = torch.optim.Adam(
+        list(critic_1.parameters()), config.qf_lr
     )
-    critic_2 = FullyConnectedQFunction(state_dim, action_dim, config.orthogonal_init).to(
-        config.device
+    critic_2_optimizer = torch.optim.Adam(
+        list(critic_2.parameters()), config.qf_lr
     )
-    critic_1_optimizer = torch.optim.Adam(list(critic_1.parameters()), config.qf_lr)
-    critic_2_optimizer = torch.optim.Adam(list(critic_2.parameters()), config.qf_lr)
 
     actor = TanhGaussianPolicy(
-        state_dim, action_dim, max_action, orthogonal_init=config.orthogonal_init
+        state_dim,
+        action_dim,
+        max_action,
+        orthogonal_init=config.orthogonal_init,
     ).to(config.device)
     actor_optimizer = torch.optim.Adam(actor.parameters(), config.policy_lr)
 
@@ -1198,12 +1310,18 @@ def train(config: TrainConfig):
             eval_log = {
                 "eval/reward_mean": np.mean(eval_returns),
                 "eval/reward_std": np.std(eval_returns),
-                "epoch": int((t+1)/1000),
+                "epoch": int((t + 1) / 1000),
             }
             if hasattr(env, "get_normalized_score"):
-                normalized_score = env.get_normalized_score(eval_returns) * 100.0
-                eval_log["eval/normalized_score_mean"] = np.mean(normalized_score)
-                eval_log["eval/normalized_score_std"] = np.std(normalized_score)
+                normalized_score = (
+                    env.get_normalized_score(eval_returns) * 100.0
+                )
+                eval_log["eval/normalized_score_mean"] = np.mean(
+                    normalized_score
+                )
+                eval_log["eval/normalized_score_std"] = np.std(
+                    normalized_score
+                )
 
             wandb.log(eval_log)
             print("---------------------------------------")
@@ -1215,18 +1333,44 @@ def train(config: TrainConfig):
             if config.checkpoints_path:
                 torch.save(
                     trainer.state_dict(),
-                    os.path.join(config.checkpoints_path, f"checkpoint_{int((t+1)/1000)}.pt"),
+                    os.path.join(
+                        config.checkpoints_path,
+                        f"checkpoint_{int((t+1)/1000)}.pt",
+                    ),
                 )
-                checkpoints = [os.path.join(config.checkpoints_path, file) for file in os.listdir(config.checkpoints_path) if os.path.splitext(file)[-1]=='.pt']
+                checkpoints = [
+                    os.path.join(config.checkpoints_path, file)
+                    for file in os.listdir(config.checkpoints_path)
+                    if os.path.splitext(file)[-1] == ".pt"
+                ]
                 checkpoints.sort(key=os.path.getmtime)
                 if len(checkpoints) > 10:
                     oldest_checkpoint = checkpoints.pop(0)
                     os.remove(oldest_checkpoint)
-                df = pd.DataFrame({"epoch": int((t+1)/1000), "return_mean": np.mean(eval_returns), "return_std": np.std(eval_returns), "normalized_score_mean": np.mean(normalized_score), "normalized_score_std": np.std(normalized_score)}, index=[0])
-                if not os.path.exists(os.path.join(config.checkpoints_path, "results.csv")):
-                    df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), index=False)
+                df = pd.DataFrame(
+                    {
+                        "epoch": int((t + 1) / 1000),
+                        "return_mean": np.mean(eval_returns),
+                        "return_std": np.std(eval_returns),
+                        "normalized_score_mean": np.mean(normalized_score),
+                        "normalized_score_std": np.std(normalized_score),
+                    },
+                    index=[0],
+                )
+                if not os.path.exists(
+                    os.path.join(config.checkpoints_path, "results.csv")
+                ):
+                    df.to_csv(
+                        os.path.join(config.checkpoints_path, "results.csv"),
+                        index=False,
+                    )
                 else:
-                    df.to_csv(os.path.join(config.checkpoints_path, "results.csv"), mode='a', header=False, index=False)
+                    df.to_csv(
+                        os.path.join(config.checkpoints_path, "results.csv"),
+                        mode="a",
+                        header=False,
+                        index=False,
+                    )
 
 
 if __name__ == "__main__":
