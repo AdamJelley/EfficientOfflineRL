@@ -6,7 +6,6 @@ mlc_run.sh
 wandb
 videos
 *.pkl
-*.txt
 plotting
 .vscode
 *.ipynb

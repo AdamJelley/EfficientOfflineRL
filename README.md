@@ -26,11 +26,13 @@ Please note also that [ReBRAC](https://arxiv.org/abs/2305.09836) (developed conc
 
 ```bash
 git clone git@github.com:AdamJelley/EfficientOfflineRL.git && cd EfficientOfflineRL
-conda create -n EORL python=3.10
+conda create -y -n EORL python=3.10
 conda activate EORL
-pip install -r requirements/requirements_dev.txt
-
-# alternatively, you could use docker
+conda install -y -c conda-forge glew=2.1.0 glfw=3.3.10
+pip install -r requirements.txt
+```
+Alternatively, you could use docker using the provided Dockerfile:
+```bash
 docker build -t <image_name> .
 docker run gpus=all -it --rm --name <container_name> <image_name>
 ```
@@ -40,7 +42,7 @@ docker run gpus=all -it --rm --name <container_name> <image_name>
 To reproduce our results for TD3+BC on Hopper-medium:
 
 ```bash
-python algorithms/td3_bc.py --config=configs/td3_bc/hopper/medium_v2.yaml --eval_freq 1000 --max_timesteps 500000 --device cuda:0 --alpha 10 --pretrain AC --pretrain_steps 10000 --td_component 0 --seed 0
+python algorithms/td3_bc.py --config=configs/td3_bc/hopper/medium_v2.yaml --device cuda:0 --alpha 10 --pretrain AC --pretrain_steps 10000 --td_component 0 --eval_freq 1000 --seed 0
 ```
 
 Or for EDAC on Hopper-medium:
