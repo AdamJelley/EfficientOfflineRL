@@ -17,8 +17,7 @@ class VideoRecorder(object):
         self.frames.append(frame)
 
     def save(self, name, wandb=None):
-        alg_name, env_name, data_name, version, id = name.split("-")
-        path = self.root_dir.joinpath(f"{env_name}-{data_name}/{alg_name}")
+        path = self.root_dir.joinpath(f"{name}")
         path.mkdir(parents=True, exist_ok=True)
         video_path = path.joinpath(
             f"{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}-{name}.mp4"

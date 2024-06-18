@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import random
+import sys
 import uuid
 
 import d4rl
@@ -18,6 +19,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+
+sys.path.append(str(Path(__file__).parent.parent.resolve()))
+from video_recorder import VideoRecorder
 
 TensorBatch = List[torch.Tensor]
 
@@ -34,6 +38,7 @@ class TrainConfig:
     max_timesteps: int = int(1e6)  # Max time steps to run environment
     checkpoints_path: Optional[str] = None  # Save path
     load_model: str = ""  # Model load file name, "" doesn't load
+    render: bool = False  # Whether to save final testing videos
     # TD3
     buffer_size: int = 2_000_000  # Replay buffer size
     batch_size: int = 256  # Batch size for all networks
@@ -274,11 +279,12 @@ def wandb_init(config: dict) -> None:
 
 @torch.no_grad()
 def eval_actor(
-    env: gym.Env, actor: nn.Module, device: str, n_episodes: int, seed: int
+    env: gym.Env, actor: nn.Module, device: str, n_episodes: int, seed: int, render: bool, name: str,
 ) -> np.ndarray:
     env.seed(seed)
     actor.eval()
     episode_rewards = []
+    video = VideoRecorder() if render else None
     # Max demonstration lengths for each environment from human data (described in Appendix H of paper)
     # TODO: Create env wrapper for harcoded truncation fix below for code release
     max_demonstration_lengths = {
@@ -291,7 +297,7 @@ def eval_actor(
     for s in max_demonstration_lengths.keys():
         if s in env.spec.id:
             max_demonstration_length = max_demonstration_lengths[s]
-    for _ in range(n_episodes):
+    for i in range(n_episodes):
         state, done = env.reset(), False
         episode_reward = 0.0
         timestep = 0
@@ -313,9 +319,13 @@ def eval_actor(
             ):
                 done = False
             episode_reward += reward
+            if video is not None and i == 0:  # Record 1 episode
+                video.record(env)
         episode_rewards.append(episode_reward)
 
     actor.train()
+    if video is not None:
+        video.save(name, wandb=wandb)
     return np.asarray(episode_rewards)
 
 
@@ -844,6 +854,8 @@ def train(config: TrainConfig):
                 device=config.device,
                 n_episodes=config.n_episodes,
                 seed=config.seed,
+                render=False,
+                name=config.name,
             )
             eval_log = {
                 "eval/reward_mean": np.mean(eval_returns),
@@ -917,6 +929,8 @@ def train(config: TrainConfig):
         device=config.device,
         n_episodes=100,
         seed=config.seed,
+        render=config.render,
+        name=config.name,
     )
     test_log = {
         "test/reward_mean": np.mean(test_returns),

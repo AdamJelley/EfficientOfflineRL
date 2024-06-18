@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import random
+import sys
 import uuid
 
 import d4rl
@@ -23,6 +24,7 @@ import torch.nn.functional as F
 from tqdm import trange
 import wandb
 
+sys.path.append(str(Path(__file__).parent.parent.resolve()))
 from video_recorder import VideoRecorder
 
 
