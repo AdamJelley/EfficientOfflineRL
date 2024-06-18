@@ -63,9 +63,7 @@ class TrainConfig:
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(
-                self.checkpoints_path, self.name
-            )
+            self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
 
 
 # general utils
@@ -73,12 +71,8 @@ TensorBatch = List[torch.Tensor]
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
-    for target_param, source_param in zip(
-        target.parameters(), source.parameters()
-    ):
-        target_param.data.copy_(
-            (1 - tau) * target_param.data + tau * source_param.data
-        )
+    for target_param, source_param in zip(target.parameters(), source.parameters()):
+        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
 
 
 def wandb_init(config: dict) -> None:
@@ -105,9 +99,7 @@ def set_seed(
     torch.use_deterministic_algorithms(deterministic_torch)
 
 
-def compute_mean_std(
-    states: np.ndarray, eps: float
-) -> Tuple[np.ndarray, np.ndarray]:
+def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
     mean = states.mean(0)
     std = states.std(0) + eps
     return mean, std
@@ -162,18 +154,14 @@ class ReplayBuffer:
         self._actions = torch.zeros(
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
-        self._rewards = torch.zeros(
-            (buffer_size, 1), dtype=torch.float32, device=device
-        )
+        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._returns_to_go = torch.zeros(
             (buffer_size, 1), dtype=torch.float32, device=device
         )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
-        self._dones = torch.zeros(
-            (buffer_size, 1), dtype=torch.float32, device=device
-        )
+        self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._discount = discount
         self._device = device
 
@@ -183,9 +171,7 @@ class ReplayBuffer:
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
-            raise ValueError(
-                "Trying to load data into non-empty replay buffer"
-            )
+            raise ValueError("Trying to load data into non-empty replay buffer")
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
             raise ValueError(
@@ -196,11 +182,7 @@ class ReplayBuffer:
         returns_to_go = []
 
         for i in range(n_transitions):
-            if (
-                data["terminals"][i]
-                or data["timeouts"][i]
-                or i == n_transitions - 1
-            ):
+            if data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1:
                 episode_rewards.append(data["rewards"][i])
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
@@ -219,15 +201,11 @@ class ReplayBuffer:
 
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(
-            data["rewards"][..., None]
-        )
+        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
         self._returns_to_go[:n_transitions] = self._to_tensor(
             data["returns_to_go"][..., None]
         )
-        self._next_states[:n_transitions] = self._to_tensor(
-            data["next_observations"]
-        )
+        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         self._dones[:n_transitions] = self._to_tensor(
             (data["terminals"] + data["timeouts"])[..., None]
         )
@@ -237,9 +215,7 @@ class ReplayBuffer:
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
-        indices = np.random.randint(
-            0, min(self._size, self._pointer), size=batch_size
-        )
+        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
@@ -255,17 +231,13 @@ class ReplayBuffer:
 
 # SAC Actor & Critic implementation
 class VectorizedLinear(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, ensemble_size: int
-    ):
+    def __init__(self, in_features: int, out_features: int, ensemble_size: int):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.ensemble_size = ensemble_size
 
-        self.weight = nn.Parameter(
-            torch.empty(ensemble_size, in_features, out_features)
-        )
+        self.weight = nn.Parameter(torch.empty(ensemble_size, in_features, out_features))
         self.bias = nn.Parameter(torch.empty(ensemble_size, 1, out_features))
 
         self.reset_parameters()
@@ -344,9 +316,7 @@ class Actor(nn.Module):
         if need_log_prob:
             # change of variables formula (SAC paper, appendix C, eq 21)
             log_prob = policy_dist.log_prob(action).sum(axis=-1)
-            log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(
-                axis=-1
-            )
+            log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(axis=-1)
 
         return tanh_action * self.max_action, log_prob
 
@@ -388,9 +358,7 @@ class VectorizedCritic(nn.Module):
 
         self.num_critics = num_critics
 
-    def forward(
-        self, state: torch.Tensor, action: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         # [batch_size, state_dim + action_dim]
         state_action = torch.cat([state, action], dim=-1)
         # [num_critics, batch_size, state_dim + action_dim]
@@ -432,24 +400,18 @@ class SACN:
         self.log_alpha = torch.tensor(
             [0.0], dtype=torch.float32, device=self.device, requires_grad=True
         )
-        self.alpha_optimizer = torch.optim.Adam(
-            [self.log_alpha], lr=alpha_learning_rate
-        )
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=alpha_learning_rate)
         self.alpha = self.log_alpha.exp().detach()
 
     def _alpha_loss(self, state: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             action, action_log_prob = self.actor(state, need_log_prob=True)
 
-        loss = (
-            -self.log_alpha * (action_log_prob + self.target_entropy)
-        ).mean()
+        loss = (-self.log_alpha * (action_log_prob + self.target_entropy)).mean()
 
         return loss
 
-    def _actor_loss(
-        self, state: torch.Tensor
-    ) -> Tuple[torch.Tensor, float, float]:
+    def _actor_loss(self, state: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
         action, action_log_prob = self.actor(state, need_log_prob=True)
         q_value_dist = self.critic(state, action)
         assert q_value_dist.shape[0] == self.critic.num_critics
@@ -551,9 +513,7 @@ class SACN:
         self.actor_optimizer.step()
 
         # Critic update
-        critic_loss = self._critic_loss(
-            state, action, reward, next_state, done
-        )
+        critic_loss = self._critic_loss(state, action, reward, next_state, done)
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
@@ -564,13 +524,9 @@ class SACN:
             # for logging, Q-ensemble std estimate with the random actions:
             # a ~ U[-max_action, max_action]
             max_action = self.actor.max_action
-            random_actions = -max_action + 2 * max_action * torch.rand_like(
-                action
-            )
+            random_actions = -max_action + 2 * max_action * torch.rand_like(action)
 
-            q_random_std = (
-                self.critic(state, random_actions).std(0).mean().item()
-            )
+            q_random_std = self.critic(state, random_actions).std(0).mean().item()
 
         update_info = {
             "alpha_loss": alpha_loss.item(),
@@ -666,9 +622,7 @@ def train(config: TrainConfig):
     if config.normalize_reward:
         modify_reward(d4rl_dataset, config.env)
 
-    state_mean, state_std = compute_mean_std(
-        d4rl_dataset["observations"], eps=1e-3
-    )
+    state_mean, state_std = compute_mean_std(d4rl_dataset["observations"], eps=1e-3)
 
     d4rl_dataset["observations"] = normalize_states(
         d4rl_dataset["observations"], state_mean, state_std
@@ -690,9 +644,7 @@ def train(config: TrainConfig):
     # Actor & Critic setup
     actor = Actor(state_dim, action_dim, config.hidden_dim, config.max_action)
     actor.to(config.device)
-    actor_optimizer = torch.optim.Adam(
-        actor.parameters(), lr=config.actor_learning_rate
-    )
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_learning_rate)
     critic = VectorizedCritic(
         state_dim, action_dim, config.hidden_dim, config.num_critics
     )
@@ -715,17 +667,13 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(
-            os.path.join(config.checkpoints_path, "config.yaml"), "w"
-        ) as f:
+        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
             pyrallis.dump(config, f)
 
     total_updates = 0.0
     for epoch in trange(config.num_epochs, desc="Training"):
         # training
-        for _ in trange(
-            config.num_updates_on_epoch, desc="Epoch", leave=False
-        ):
+        for _ in trange(config.num_updates_on_epoch, desc="Epoch", leave=False):
             batch = buffer.sample(config.batch_size)
             if config.pretrain is not None:
                 if epoch <= config.pretrain_epochs:
@@ -766,15 +714,9 @@ def train(config: TrainConfig):
                 "epoch": epoch,
             }
             if hasattr(eval_env, "get_normalized_score"):
-                normalized_score = (
-                    eval_env.get_normalized_score(eval_returns) * 100.0
-                )
-                eval_log["eval/normalized_score_mean"] = np.mean(
-                    normalized_score
-                )
-                eval_log["eval/normalized_score_std"] = np.std(
-                    normalized_score
-                )
+                normalized_score = eval_env.get_normalized_score(eval_returns) * 100.0
+                eval_log["eval/normalized_score_mean"] = np.mean(normalized_score)
+                eval_log["eval/normalized_score_std"] = np.std(normalized_score)
 
             wandb.log(eval_log)
 

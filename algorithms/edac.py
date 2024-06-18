@@ -89,12 +89,8 @@ TensorBatch = List[torch.Tensor]
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
-    for target_param, source_param in zip(
-        target.parameters(), source.parameters()
-    ):
-        target_param.data.copy_(
-            (1 - tau) * target_param.data + tau * source_param.data
-        )
+    for target_param, source_param in zip(target.parameters(), source.parameters()):
+        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
 
 
 def wandb_init(config: dict) -> None:
@@ -121,9 +117,7 @@ def set_seed(
     torch.use_deterministic_algorithms(deterministic_torch)
 
 
-def compute_mean_std(
-    states: np.ndarray, eps: float
-) -> Tuple[np.ndarray, np.ndarray]:
+def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
     mean = states.mean(0)
     std = states.std(0) + eps
     return mean, std
@@ -145,9 +139,7 @@ def discount_cumsum(x, discount, include_first=True):
     else:
         disc_cumsum[-1] = 0
         for t in reversed(range(x.shape[0] - 1)):
-            disc_cumsum[t] = (
-                discount * x[t + 1] + discount * disc_cumsum[t + 1]
-            )
+            disc_cumsum[t] = discount * x[t + 1] + discount * disc_cumsum[t + 1]
     return disc_cumsum
 
 
@@ -190,9 +182,7 @@ class ReplayBuffer:
         self._actions = torch.zeros(
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
-        self._rewards = torch.zeros(
-            (buffer_size, 1), dtype=torch.float32, device=device
-        )
+        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._returns_to_go = torch.zeros(
             (buffer_size, 1), dtype=torch.float32, device=device
         )
@@ -208,9 +198,7 @@ class ReplayBuffer:
         self._timeouts = torch.zeros(
             (buffer_size, 1), dtype=torch.float32, device=device
         )
-        self._dones = torch.zeros(
-            (buffer_size, 1), dtype=torch.float32, device=device
-        )
+        self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._discount = discount
         self._batch_size = batch_size
         self._device = device
@@ -225,11 +213,7 @@ class ReplayBuffer:
 
         for i in range(n_transitions):
             episode_rewards.append(data["rewards"][i])
-            if (
-                data["terminals"][i]
-                or data["timeouts"][i]
-                or i == n_transitions - 1
-            ):
+            if data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1:
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
                 )
@@ -244,9 +228,7 @@ class ReplayBuffer:
             ]
         ).flatten()
 
-        self._returns_to_go[:n_transitions] = self._to_tensor(
-            returns_to_go[..., None]
-        )
+        self._returns_to_go[:n_transitions] = self._to_tensor(returns_to_go[..., None])
 
     def compute_soft_returns_to_go(self, alpha: torch.Tensor, actor: "Actor"):
         n_transitions = self._states.shape[0]
@@ -277,12 +259,10 @@ class ReplayBuffer:
             episode_entropy_bonuses.append(self._entropy_bonuses[i].item())
             if self._dones[i] or i == n_transitions - 1:
                 if self._timeouts[i] or i == n_transitions - 1:
-                    episode_rewards[-1] = episode_rewards[-1] / (
+                    episode_rewards[-1] = episode_rewards[-1] / (1 - self._discount)
+                    episode_entropy_bonuses[-1] = episode_entropy_bonuses[-1] / (
                         1 - self._discount
                     )
-                    episode_entropy_bonuses[-1] = episode_entropy_bonuses[
-                        -1
-                    ] / (1 - self._discount)
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
                 ) + alpha.detach().item() * discount_cumsum(
@@ -310,9 +290,7 @@ class ReplayBuffer:
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
-            raise ValueError(
-                "Trying to load data into non-empty replay buffer"
-            )
+            raise ValueError("Trying to load data into non-empty replay buffer")
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
             raise ValueError(
@@ -321,16 +299,10 @@ class ReplayBuffer:
 
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(
-            data["rewards"][..., None]
-        )
-        self._next_states[:n_transitions] = self._to_tensor(
-            data["next_observations"]
-        )
+        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
+        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
 
-        self._timeouts[:n_transitions] = self._to_tensor(
-            data["timeouts"][..., None]
-        )
+        self._timeouts[:n_transitions] = self._to_tensor(data["timeouts"][..., None])
         self._dones[:n_transitions] = self._to_tensor(
             (data["terminals"] + data["timeouts"])[..., None]
         )
@@ -343,9 +315,7 @@ class ReplayBuffer:
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
-        indices = np.random.randint(
-            0, min(self._size, self._pointer), size=batch_size
-        )
+        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
@@ -371,17 +341,13 @@ class ReplayBuffer:
 
 # SAC Actor & Critic implementation
 class VectorizedLinear(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, ensemble_size: int
-    ):
+    def __init__(self, in_features: int, out_features: int, ensemble_size: int):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.ensemble_size = ensemble_size
 
-        self.weight = nn.Parameter(
-            torch.empty(ensemble_size, in_features, out_features)
-        )
+        self.weight = nn.Parameter(torch.empty(ensemble_size, in_features, out_features))
         self.bias = nn.Parameter(torch.empty(ensemble_size, 1, out_features))
 
         self.reset_parameters()
@@ -414,19 +380,25 @@ class Actor(nn.Module):
         super().__init__()
         self.trunk = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if actor_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if actor_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if actor_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if actor_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if actor_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if actor_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
         )
         # with separate layers works better than with Linear(hidden_dim, 2 * action_dim)
@@ -468,18 +440,14 @@ class Actor(nn.Module):
         if need_log_prob:
             # change of variables formula (SAC paper, appendix C, eq 21)
             log_prob = policy_dist.log_prob(action).sum(axis=-1)
-            log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(
-                axis=-1
-            )
+            log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(axis=-1)
 
         if need_policy_dist:
             return tanh_action * self.max_action, log_prob, policy_dist
 
         return tanh_action * self.max_action, log_prob
 
-    def log_prob(
-        self, state: torch.Tensor, action: torch.Tensor
-    ) -> torch.Tensor:
+    def log_prob(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         hidden = self.trunk(state)
         mu, log_sigma = self.mu(hidden), self.log_sigma(hidden)
 
@@ -487,9 +455,7 @@ class Actor(nn.Module):
         log_sigma = torch.clip(log_sigma, -5, 2)
         policy_dist = Normal(mu, torch.exp(log_sigma))
 
-        action = torch.clip(
-            action, -self.max_action + 1e-6, self.max_action - 1e-6
-        )
+        action = torch.clip(action, -self.max_action + 1e-6, self.max_action - 1e-6)
         log_prob = policy_dist.log_prob(torch.arctanh(action)).sum(axis=-1)
         log_prob = log_prob - torch.log(1 - action.pow(2) + 1e-6).sum(axis=-1)
         return log_prob
@@ -514,19 +480,25 @@ class VectorizedCritic(nn.Module):
         super().__init__()
         self.critic = nn.Sequential(
             VectorizedLinear(state_dim + action_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if critic_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if critic_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if critic_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if critic_LN
+                else nn.Identity
+            ),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if critic_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if critic_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, 1, num_critics),
         )
@@ -539,9 +511,7 @@ class VectorizedCritic(nn.Module):
 
         self.num_critics = num_critics
 
-    def forward(
-        self, state: torch.Tensor, action: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         # [..., batch_size, state_dim + action_dim]
         state_action = torch.cat([state, action], dim=-1)
         if state_action.dim() != 3:
@@ -605,18 +575,14 @@ class EDAC:
         self.log_alpha = torch.tensor(
             [0.0], dtype=torch.float32, device=self.device, requires_grad=True
         )
-        self.alpha_optimizer = torch.optim.Adam(
-            [self.log_alpha], lr=alpha_learning_rate
-        )
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=alpha_learning_rate)
         self.alpha = self.log_alpha.exp().detach()
 
     def _alpha_loss(self, state: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             action, action_log_prob = self.actor(state, need_log_prob=True)
 
-        loss = (
-            -self.log_alpha * (action_log_prob + self.target_entropy)
-        ).mean()
+        loss = (-self.log_alpha * (action_log_prob + self.target_entropy)).mean()
 
         return loss
 
@@ -644,8 +610,7 @@ class EDAC:
             bc_loss = F.mse_loss(pi, action)
             loss = (self.alpha * log_pi - q_value_min).mean()
             loss = (
-                loss / loss.detach()
-                + self.bc_regulariser * bc_loss / bc_loss.detach()
+                loss / loss.detach() + self.bc_regulariser * bc_loss / bc_loss.detach()
             )
         elif self.soft_bc_regulariser > 0.0:
             bc_loss = (self.alpha * log_pi - log_prob_action).mean()
@@ -654,8 +619,7 @@ class EDAC:
             )
             loss = (self.alpha * log_pi - q_value_min).mean()
             loss = (
-                loss / loss.detach()
-                - self.soft_bc_regulariser * log_prob_action.mean()
+                loss / loss.detach() - self.soft_bc_regulariser * log_prob_action.mean()
             )
         else:
             loss = (self.alpha * log_pi - q_value_min).mean()
@@ -726,9 +690,7 @@ class EDAC:
         q_values = self.critic(state, action)
 
         # [ensemble_size, batch_size] - [1, batch_size]
-        critic_loss = (
-            ((q_values - q_target.view(1, -1)) ** 2).mean(dim=1).sum(dim=0)
-        )
+        critic_loss = ((q_values - q_target.view(1, -1)) ** 2).mean(dim=1).sum(dim=0)
         diversity_loss = self._critic_diversity_loss(state, action)
 
         loss = critic_loss + self.eta * diversity_loss
@@ -784,28 +746,18 @@ class EDAC:
                 next_action, next_action_log_prob = self.actor(
                     next_state, need_log_prob=True
                 )
-                q_next = (
-                    self.target_critic(next_state, next_action).min(0).values
-                )
+                q_next = self.target_critic(next_state, next_action).min(0).values
                 q_next = q_next - self.alpha * next_action_log_prob
 
                 assert q_next.unsqueeze(-1).shape == done.shape == reward.shape
-                q_target0 = reward + self.gamma * (
-                    1 - done
-                ) * q_next.unsqueeze(-1)
+                q_target0 = reward + self.gamma * (1 - done) * q_next.unsqueeze(-1)
 
             # [ensemble_size, batch_size] - [1, batch_size]
             TD_critic_loss = (
-                ((q_values - q_target0.view(1, -1)) ** 2)
-                .mean(dim=1)
-                .sum(dim=0)
+                ((q_values - q_target0.view(1, -1)) ** 2).mean(dim=1).sum(dim=0)
             )
             critic_loss = (
-                (
-                    (1 - self.td_component)
-                    * MC_critic_loss
-                    / MC_critic_loss.detach()
-                )
+                ((1 - self.td_component) * MC_critic_loss / MC_critic_loss.detach())
                 + self.td_component * TD_critic_loss / TD_critic_loss.detach()
                 + self.eta * diversity_loss
             )
@@ -822,13 +774,9 @@ class EDAC:
             # for logging, Q-ensemble std estimate with the random actions:
             # a ~ U[-max_action, max_action]
             max_action = self.actor.max_action
-            random_actions = -max_action + 2 * max_action * torch.rand_like(
-                action
-            )
+            random_actions = -max_action + 2 * max_action * torch.rand_like(action)
 
-            q_random_std = (
-                self.critic(state, random_actions).std(0).mean().item()
-            )
+            q_random_std = self.critic(state, random_actions).std(0).mean().item()
             log_dict["q_random_std"] = q_random_std
 
         return log_dict
@@ -869,13 +817,9 @@ class EDAC:
             # for logging, Q-ensemble std estimate with the random actions:
             # a ~ U[-max_action, max_action]
             max_action = self.actor.max_action
-            random_actions = -max_action + 2 * max_action * torch.rand_like(
-                action
-            )
+            random_actions = -max_action + 2 * max_action * torch.rand_like(action)
 
-            q_random_std = (
-                self.critic(state, random_actions).std(0).mean().item()
-            )
+            q_random_std = self.critic(state, random_actions).std(0).mean().item()
 
         update_info = {
             "alpha_loss": alpha_loss.item(),
@@ -1001,17 +945,13 @@ def train(config: TrainConfig):
     if config.normalize_reward:
         modify_reward(d4rl_dataset, config.env_name)
 
-    state_mean, state_std = compute_mean_std(
-        d4rl_dataset["observations"], eps=1e-3
-    )
+    state_mean, state_std = compute_mean_std(d4rl_dataset["observations"], eps=1e-3)
 
     if "next_observations" not in d4rl_dataset.keys():
         d4rl_dataset["next_observations"] = np.roll(
             d4rl_dataset["observations"], shift=-1, axis=0
         )  # Terminals/timeouts block next observations
-        print(
-            "Loaded next state observations from current state observations."
-        )
+        print("Loaded next state observations from current state observations.")
 
     d4rl_dataset["observations"] = normalize_states(
         d4rl_dataset["observations"], state_mean, state_std
@@ -1041,9 +981,7 @@ def train(config: TrainConfig):
         config.actor_LN,
     )
     actor.to(config.device)
-    actor_optimizer = torch.optim.Adam(
-        actor.parameters(), lr=config.actor_learning_rate
-    )
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_learning_rate)
     critic = VectorizedCritic(
         state_dim,
         action_dim,
@@ -1080,17 +1018,13 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(
-            os.path.join(config.checkpoints_path, "config.yaml"), "w"
-        ) as f:
+        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
             pyrallis.dump(config, f)
 
     total_updates = 0.0
     for epoch in trange(config.num_epochs, desc="Training"):
         # training
-        for _ in trange(
-            config.num_updates_on_epoch, desc="Epoch", leave=False
-        ):
+        for _ in trange(config.num_updates_on_epoch, desc="Epoch", leave=False):
             batch = buffer.sample(config.batch_size)
             if config.pretrain is not None:
                 if epoch <= config.pretrain_epochs:
@@ -1107,9 +1041,7 @@ def train(config: TrainConfig):
                                     alpha=trainer.alpha,
                                     actor=trainer.actor,
                                 )
-                                print(
-                                    "Soft returns to go loaded for BC actor!"
-                                )
+                                print("Soft returns to go loaded for BC actor!")
                             assert buffer._soft_returns_loaded == True
                             update_info = trainer.pretrain_soft_critic(
                                 batch, epoch, config.pretrain_epochs
@@ -1120,9 +1052,7 @@ def train(config: TrainConfig):
                                 alpha=trainer.alpha,
                                 actor=trainer.actor,
                             )
-                            print(
-                                "Soft returns to go loaded for initialised actor!"
-                            )
+                            print("Soft returns to go loaded for initialised actor!")
                         assert buffer._soft_returns_loaded == True
                         update_info = trainer.pretrain_soft_critic(
                             batch, epoch, config.pretrain_epochs
@@ -1134,9 +1064,7 @@ def train(config: TrainConfig):
                 else:
                     if epoch == config.pretrain_epochs + 1:
                         with torch.no_grad():
-                            trainer.pretrained_critic = deepcopy(
-                                trainer.critic
-                            )
+                            trainer.pretrained_critic = deepcopy(trainer.critic)
                             trainer.pretrained_actor = deepcopy(trainer.actor)
                     update_info = trainer.update(batch)
             else:
@@ -1164,15 +1092,9 @@ def train(config: TrainConfig):
                 "epoch": epoch,
             }
             if hasattr(eval_env, "get_normalized_score"):
-                normalized_score = (
-                    eval_env.get_normalized_score(eval_returns) * 100.0
-                )
-                eval_log["eval/normalized_score_mean"] = np.mean(
-                    normalized_score
-                )
-                eval_log["eval/normalized_score_std"] = np.std(
-                    normalized_score
-                )
+                normalized_score = eval_env.get_normalized_score(eval_returns) * 100.0
+                eval_log["eval/normalized_score_mean"] = np.mean(normalized_score)
+                eval_log["eval/normalized_score_std"] = np.std(normalized_score)
 
             wandb.log(eval_log)
 

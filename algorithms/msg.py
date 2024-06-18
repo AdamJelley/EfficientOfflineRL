@@ -63,9 +63,7 @@ class TrainConfig:
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(
-                self.checkpoints_path, self.name
-            )
+            self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
 
 
 # general utils
@@ -73,12 +71,8 @@ TensorBatch = List[torch.Tensor]
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
-    for target_param, source_param in zip(
-        target.parameters(), source.parameters()
-    ):
-        target_param.data.copy_(
-            (1 - tau) * target_param.data + tau * source_param.data
-        )
+    for target_param, source_param in zip(target.parameters(), source.parameters()):
+        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
 
 
 def wandb_init(config: dict) -> None:
@@ -104,9 +98,7 @@ def set_seed(
     torch.use_deterministic_algorithms(deterministic_torch)
 
 
-def compute_mean_std(
-    states: np.ndarray, eps: float
-) -> Tuple[np.ndarray, np.ndarray]:
+def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
     mean = states.mean(0)
     std = states.std(0) + eps
     return mean, std
@@ -125,9 +117,7 @@ def discount_cumsum(x, discount, include_first=True):
     else:
         disc_cumsum[-1] = 0
         for t in reversed(range(x.shape[0] - 1)):
-            disc_cumsum[t] = (
-                discount * x[t + 1] + discount * disc_cumsum[t + 1]
-            )
+            disc_cumsum[t] = discount * x[t + 1] + discount * disc_cumsum[t + 1]
     return disc_cumsum
 
 
@@ -196,9 +186,7 @@ class ReplayBuffer:
         self._actions = torch.zeros(
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
-        self._rewards = torch.zeros(
-            (buffer_size, 1), dtype=torch.float32, device=device
-        )
+        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._returns_to_go = torch.zeros(
             (buffer_size, 1), dtype=torch.float32, device=device
         )
@@ -217,9 +205,7 @@ class ReplayBuffer:
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
-        self._dones = torch.zeros(
-            (buffer_size, 1), dtype=torch.float32, device=device
-        )
+        self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._discount = discount
         self._device = device
 
@@ -236,9 +222,7 @@ class ReplayBuffer:
                 data["rewards"][i]
             )  # - 1* self._action_dim* torch.log(1 / torch.sqrt(torch.tensor(2 * np.pi))))
             if (
-                data["terminals"][i]
-                or data["timeouts"][i]
-                or i == n_transitions - 1
+                data["terminals"][i] or data["timeouts"][i] or i == n_transitions - 1
             ):  # TODO: Deal with incomplete trajectory case
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
@@ -259,9 +243,7 @@ class ReplayBuffer:
         )  # Terminals/timeouts block next returns to go
         assert next_returns_to_go[0] == returns_to_go[1]
 
-        self._returns_to_go[:n_transitions] = self._to_tensor(
-            returns_to_go[..., None]
-        )
+        self._returns_to_go[:n_transitions] = self._to_tensor(returns_to_go[..., None])
         self._next_returns_to_go[:n_transitions] = self._to_tensor(
             next_returns_to_go[..., None]
         )
@@ -292,9 +274,7 @@ class ReplayBuffer:
 
         for i in range(n_transitions):
             episode_rewards.append(self._rewards[i].cpu().item())
-            episode_entropy_bonuses.append(
-                self._entropy_bonuses[i].cpu().item()
-            )
+            episode_entropy_bonuses.append(self._entropy_bonuses[i].cpu().item())
             if self._dones[i] or i == n_transitions - 1:
                 episode_returns_to_go = discount_cumsum(
                     np.array(episode_rewards), self._discount
@@ -331,9 +311,7 @@ class ReplayBuffer:
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
-            raise ValueError(
-                "Trying to load data into non-empty replay buffer"
-            )
+            raise ValueError("Trying to load data into non-empty replay buffer")
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
             raise ValueError(
@@ -347,12 +325,8 @@ class ReplayBuffer:
 
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(
-            data["rewards"][..., None]
-        )
-        self._next_states[:n_transitions] = self._to_tensor(
-            data["next_observations"]
-        )
+        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
+        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
 
         self._dones[:n_transitions] = self._to_tensor(
             (data["terminals"] + data["timeouts"])[..., None]
@@ -366,9 +340,7 @@ class ReplayBuffer:
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
-        indices = np.random.randint(
-            0, min(self._size, self._pointer), size=batch_size
-        )
+        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
         states = self._states[indices]
         actions = self._actions[indices]
         rewards = self._rewards[indices]
@@ -397,17 +369,13 @@ class ReplayBuffer:
 
 # SAC Actor & Critic implementation
 class VectorizedLinear(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, ensemble_size: int
-    ):
+    def __init__(self, in_features: int, out_features: int, ensemble_size: int):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.ensemble_size = ensemble_size
 
-        self.weight = nn.Parameter(
-            torch.empty(ensemble_size, in_features, out_features)
-        )
+        self.weight = nn.Parameter(torch.empty(ensemble_size, in_features, out_features))
         self.bias = nn.Parameter(torch.empty(ensemble_size, 1, out_features))
 
         self.reset_parameters()
@@ -440,19 +408,25 @@ class Actor(nn.Module):
         super().__init__()
         self.trunk = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if actor_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if actor_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if actor_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if actor_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if actor_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if actor_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
         )
         # with separate layers works better than with Linear(hidden_dim, 2 * action_dim)
@@ -494,15 +468,11 @@ class Actor(nn.Module):
         if need_log_prob:
             # change of variables formula (SAC paper, appendix C, eq 21)
             log_prob = policy_dist.log_prob(action).sum(axis=-1)
-            log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(
-                axis=-1
-            )
+            log_prob = log_prob - torch.log(1 - tanh_action.pow(2) + 1e-6).sum(axis=-1)
 
         return tanh_action * self.max_action, log_prob
 
-    def log_prob(
-        self, state: torch.Tensor, action: torch.Tensor
-    ) -> torch.Tensor:
+    def log_prob(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         hidden = self.trunk(state)
         mu, log_sigma = self.mu(hidden), self.log_sigma(hidden)
         # print(mu.mean())
@@ -545,19 +515,25 @@ class VectorizedCritic(nn.Module):
         super().__init__()
         self.critic = nn.Sequential(
             VectorizedLinear(state_dim + action_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if critic_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if critic_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if critic_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if critic_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, hidden_dim, num_critics),
-            nn.LayerNorm(hidden_dim, elementwise_affine=False)
-            if critic_LN
-            else nn.Identity(),
+            (
+                nn.LayerNorm(hidden_dim, elementwise_affine=False)
+                if critic_LN
+                else nn.Identity()
+            ),
             nn.ReLU(),
             VectorizedLinear(hidden_dim, 1, num_critics),
         )
@@ -570,9 +546,7 @@ class VectorizedCritic(nn.Module):
 
         self.num_critics = num_critics
 
-    def forward(
-        self, state: torch.Tensor, action: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         # [..., batch_size, state_dim + action_dim]
         state_action = torch.cat([state, action], dim=-1)
         if state_action.dim() != 3:
@@ -630,27 +604,21 @@ class MSG:
         self.log_alpha = torch.tensor(
             [0.0], dtype=torch.float32, device=self.device, requires_grad=True
         )
-        self.alpha_optimizer = torch.optim.Adam(
-            [self.log_alpha], lr=alpha_learning_rate
-        )
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=alpha_learning_rate)
         self.alpha = self.log_alpha.exp().detach()
 
     def _alpha_loss(self, state: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             action, action_log_prob = self.actor(state, need_log_prob=True)
 
-        loss = (
-            -self.log_alpha * (action_log_prob + self.target_entropy)
-        ).mean()
+        loss = (-self.log_alpha * (action_log_prob + self.target_entropy)).mean()
 
         return loss
 
     def _actor_loss(
         self, state: torch.Tensor, action: torch.Tensor
     ) -> Tuple[torch.Tensor, float, float]:
-        pi, log_pi = self.actor(
-            state, need_log_prob=True
-        )  # , deterministic=True
+        pi, log_pi = self.actor(state, need_log_prob=True)  # , deterministic=True
 
         # log_prob_action = self.actor.log_prob(state, action)
 
@@ -691,10 +659,7 @@ class MSG:
             # q_next = q_nexts.mean(0) - 2 * q_nexts.std(0)
             q_next = q_next - self.alpha * next_action_log_prob.unsqueeze(0)
             assert q_next.shape[1] == done.shape[0] == reward.shape[0]
-            q_target = (
-                reward.view(1, -1)
-                + self.gamma * (1 - done.view(1, -1)) * q_next
-            )
+            q_target = reward.view(1, -1) + self.gamma * (1 - done.view(1, -1)) * q_next
 
         q_values = self.critic(state, action)
         # [ensemble_size, batch_size] - [1, batch_size]
@@ -703,9 +668,7 @@ class MSG:
         pi, _ = self.actor(state, need_log_prob=False)
         q_policy_values = self.critic(state, pi)
 
-        support_regulariser = (
-            (q_policy_values - q_values).mean(dim=1).sum(dim=0)
-        )
+        support_regulariser = (q_policy_values - q_values).mean(dim=1).sum(dim=0)
 
         # loss = (1 / critic_loss.abs().mean().detach()) *
         loss = critic_loss + self.eta * support_regulariser
@@ -768,9 +731,7 @@ class MSG:
 
         # self.alpha = self.log_alpha.exp().detach()
         # Compute actor loss
-        pi, action_log_prob = self.actor(
-            state, deterministic=True, need_log_prob=True
-        )
+        pi, action_log_prob = self.actor(state, deterministic=True, need_log_prob=True)
         actor_loss = F.mse_loss(
             pi, action
         ) + self.alpha * self.actor.action_dim * torch.log(
@@ -827,9 +788,7 @@ class MSG:
         # Compute critic loss
         q = self.critic(state, action).mean(dim=0)
         diversity_loss = self._critic_diversity_loss(state, action)
-        critic_loss = (
-            F.mse_loss(q, return_to_go.squeeze()) + self.eta * diversity_loss
-        )
+        critic_loss = F.mse_loss(q, return_to_go.squeeze()) + self.eta * diversity_loss
         log_dict["critic_loss"] = critic_loss.item()
         # Optimize the critic
         self.pretrain_critic_optimizer.zero_grad()
@@ -898,10 +857,7 @@ class MSG:
             #     self.target_critic(next_state, next_action).min(0).values.unsqueeze(-1)
             # )
 
-            q_next = (
-                next_return_to_go
-                - self.alpha * next_action_log_prob.unsqueeze(-1)
-            )
+            q_next = next_return_to_go - self.alpha * next_action_log_prob.unsqueeze(-1)
             q_target = reward + self.gamma * (1 - done) * q_next
 
         q_values = (
@@ -911,9 +867,7 @@ class MSG:
         pi, _ = self.actor(state, need_log_prob=False)
         q_policy_values = self.critic(state, pi)
 
-        support_regulariser = (
-            (q_policy_values - q_values).mean(dim=1).sum(dim=0)
-        )
+        support_regulariser = (q_policy_values - q_values).mean(dim=1).sum(dim=0)
         # # [ensemble_size, batch_size] - [1, batch_size]
         critic_loss = (
             ((q_values - q_target.view(1, -1)) ** 2).mean(dim=1).sum(dim=0)
@@ -939,13 +893,9 @@ class MSG:
             # for logging, Q-ensemble std estimate with the random actions:
             # a ~ U[-max_action, max_action]
             max_action = self.actor.max_action
-            random_actions = -max_action + 2 * max_action * torch.rand_like(
-                action
-            )
+            random_actions = -max_action + 2 * max_action * torch.rand_like(action)
 
-            q_random_std = (
-                self.critic(state, random_actions).std(0).mean().item()
-            )
+            q_random_std = self.critic(state, random_actions).std(0).mean().item()
 
         log_dict = {
             "critic_loss": critic_loss.item(),
@@ -977,17 +927,13 @@ class MSG:
         self.alpha = self.log_alpha.exp().detach()
 
         # Actor update
-        actor_loss, actor_batch_entropy, q_policy_std = self._actor_loss(
-            state, action
-        )
+        actor_loss, actor_batch_entropy, q_policy_std = self._actor_loss(state, action)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
 
         # Critic update
-        critic_loss = self._critic_loss(
-            state, action, reward, next_state, done
-        )
+        critic_loss = self._critic_loss(state, action, reward, next_state, done)
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
@@ -998,13 +944,9 @@ class MSG:
             # for logging, Q-ensemble std estimate with the random actions:
             # a ~ U[-max_action, max_action]
             max_action = self.actor.max_action
-            random_actions = -max_action + 2 * max_action * torch.rand_like(
-                action
-            )
+            random_actions = -max_action + 2 * max_action * torch.rand_like(action)
 
-            q_random_std = (
-                self.critic(state, random_actions).std(0).mean().item()
-            )
+            q_random_std = self.critic(state, random_actions).std(0).mean().item()
 
         update_info = {
             "alpha_loss": alpha_loss.item(),
@@ -1014,12 +956,10 @@ class MSG:
             "alpha": self.alpha.item(),
             "q_policy_std": q_policy_std,
             "q_random_std": q_random_std,
-            "actor_lr": [
-                group["lr"] for group in self.actor_optimizer.param_groups
-            ][0],
-            "critic_lr": [
-                group["lr"] for group in self.critic_optimizer.param_groups
-            ][0],
+            "actor_lr": [group["lr"] for group in self.actor_optimizer.param_groups][0],
+            "critic_lr": [group["lr"] for group in self.critic_optimizer.param_groups][
+                0
+            ],
         }
         return update_info
 
@@ -1109,9 +1049,7 @@ def train(config: TrainConfig):
     if config.normalize_reward:
         modify_reward(d4rl_dataset, config.env_name)
 
-    state_mean, state_std = compute_mean_std(
-        d4rl_dataset["observations"], eps=1e-3
-    )
+    state_mean, state_std = compute_mean_std(d4rl_dataset["observations"], eps=1e-3)
 
     d4rl_dataset["observations"] = normalize_states(
         d4rl_dataset["observations"], state_mean, state_std
@@ -1120,9 +1058,7 @@ def train(config: TrainConfig):
         d4rl_dataset["next_observations"] = np.roll(
             d4rl_dataset["observations"], shift=-1, axis=0
         )  # Terminals/timeouts block next observations
-        print(
-            "Loaded next state observations from current state observations."
-        )
+        print("Loaded next state observations from current state observations.")
 
     d4rl_dataset["next_observations"] = normalize_states(
         d4rl_dataset["next_observations"], state_mean, state_std
@@ -1151,9 +1087,7 @@ def train(config: TrainConfig):
     pretrain_actor_optimizer = torch.optim.Adam(
         actor.parameters(), lr=5 * config.actor_learning_rate
     )
-    actor_optimizer = torch.optim.Adam(
-        actor.parameters(), lr=config.actor_learning_rate
-    )
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_learning_rate)
     # actor_scheduler = torch.optim.lr_scheduler.LinearLR(
     #     actor_optimizer, start_factor=0.01, total_iters=500
     # )
@@ -1201,18 +1135,14 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(
-            os.path.join(config.checkpoints_path, "config.yaml"), "w"
-        ) as f:
+        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
             pyrallis.dump(config, f)
 
     total_updates = 0.0
     # reset_optimisers = True
     for epoch in trange(config.num_epochs, desc="Training"):
         # training
-        for _ in trange(
-            config.num_updates_on_epoch, desc="Epoch", leave=False
-        ):
+        for _ in trange(config.num_updates_on_epoch, desc="Epoch", leave=False):
             batch = buffer.sample(config.batch_size)
             if config.pretrain is not None:
                 if epoch <= config.pretrain_epochs:
@@ -1232,9 +1162,7 @@ def train(config: TrainConfig):
                                     alpha=trainer.alpha,
                                     actor=trainer.actor,
                                 )
-                                print(
-                                    "Soft returns to go loaded for BC actor!"
-                                )
+                                print("Soft returns to go loaded for BC actor!")
                             assert buffer._soft_returns_loaded == True
                             update_info = trainer.pretrain_soft_critic(
                                 batch, epoch, config.pretrain_epochs
@@ -1246,9 +1174,7 @@ def train(config: TrainConfig):
                                 alpha=trainer.alpha,
                                 actor=trainer.actor,
                             )
-                            print(
-                                "Soft returns to go loaded for initialised actor!"
-                            )
+                            print("Soft returns to go loaded for initialised actor!")
                         assert buffer._soft_returns_loaded == True
                         update_info = trainer.pretrain_soft_critic(
                             batch, epoch, config.pretrain_epochs
@@ -1299,15 +1225,9 @@ def train(config: TrainConfig):
                 "epoch": epoch,
             }
             if hasattr(eval_env, "get_normalized_score"):
-                normalized_score = (
-                    eval_env.get_normalized_score(eval_returns) * 100.0
-                )
-                eval_log["eval/normalized_score_mean"] = np.mean(
-                    normalized_score
-                )
-                eval_log["eval/normalized_score_std"] = np.std(
-                    normalized_score
-                )
+                normalized_score = eval_env.get_normalized_score(eval_returns) * 100.0
+                eval_log["eval/normalized_score_mean"] = np.mean(normalized_score)
+                eval_log["eval/normalized_score_std"] = np.std(normalized_score)
 
             wandb.log(eval_log)
 

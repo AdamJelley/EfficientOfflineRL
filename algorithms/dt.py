@@ -61,9 +61,7 @@ class TrainConfig:
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(
-                self.checkpoints_path, self.name
-            )
+            self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
 
 
 # general utils
@@ -119,9 +117,7 @@ def pad_along_axis(
 
     npad = [(0, 0)] * arr.ndim
     npad[axis] = (0, pad_size)
-    return np.pad(
-        arr, pad_width=npad, mode="constant", constant_values=fill_value
-    )
+    return np.pad(arr, pad_width=npad, mode="constant", constant_values=fill_value)
 
 
 def discounted_cumsum(x: np.ndarray, gamma: float) -> np.ndarray:
@@ -139,17 +135,13 @@ def load_d4rl_trajectories(
     traj, traj_len = [], []
 
     data_, episode_step = defaultdict(list), 0
-    for i in trange(
-        dataset["rewards"].shape[0], desc="Processing trajectories"
-    ):
+    for i in trange(dataset["rewards"].shape[0], desc="Processing trajectories"):
         data_["observations"].append(dataset["observations"][i])
         data_["actions"].append(dataset["actions"][i])
         data_["rewards"].append(dataset["rewards"][i])
 
         if dataset["terminals"][i] or dataset["timeouts"][i]:
-            episode_data = {
-                k: np.array(v, dtype=np.float32) for k, v in data_.items()
-            }
+            episode_data = {k: np.array(v, dtype=np.float32) for k, v in data_.items()}
             # return-to-go if gamma=1.0, just discounted returns else
             episode_data["returns"] = discounted_cumsum(
                 episode_data["rewards"], gamma=gamma
@@ -171,9 +163,7 @@ def load_d4rl_trajectories(
 
 
 class SequenceDataset(IterableDataset):
-    def __init__(
-        self, env_name: str, seq_len: int = 10, reward_scale: float = 1.0
-    ):
+    def __init__(self, env_name: str, seq_len: int = 10, reward_scale: float = 1.0):
         self.dataset, info = load_d4rl_trajectories(env_name, gamma=1.0)
         self.reward_scale = reward_scale
         self.seq_len = seq_len
@@ -210,9 +200,7 @@ class SequenceDataset(IterableDataset):
     def __iter__(self):
         while True:
             traj_idx = np.random.choice(len(self.dataset), p=self.sample_prob)
-            start_idx = random.randint(
-                0, self.dataset[traj_idx]["rewards"].shape[0] - 1
-            )
+            start_idx = random.randint(0, self.dataset[traj_idx]["rewards"].shape[0] - 1)
             yield self.__prepare_sample(traj_idx, start_idx)
 
 
@@ -307,9 +295,7 @@ class DecisionTransformer(nn.Module):
                 for _ in range(num_layers)
             ]
         )
-        self.action_head = nn.Sequential(
-            nn.Linear(embedding_dim, action_dim), nn.Tanh()
-        )
+        self.action_head = nn.Sequential(nn.Linear(embedding_dim, action_dim), nn.Tanh())
         self.seq_len = seq_len
         self.embedding_dim = embedding_dim
         self.state_dim = state_dim
@@ -394,12 +380,8 @@ def eval_rollout(
         dtype=torch.float,
         device=device,
     )
-    returns = torch.zeros(
-        1, model.episode_len + 1, dtype=torch.float, device=device
-    )
-    time_steps = torch.arange(
-        model.episode_len, dtype=torch.long, device=device
-    )
+    returns = torch.zeros(1, model.episode_len + 1, dtype=torch.float, device=device)
+    time_steps = torch.arange(model.episode_len, dtype=torch.long, device=device)
     time_steps = time_steps.view(1, -1)
 
     states[:, 0] = torch.as_tensor(env.reset(), device=device)
@@ -489,18 +471,14 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(
-            os.path.join(config.checkpoints_path, "config.yaml"), "w"
-        ) as f:
+        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
             pyrallis.dump(config, f)
 
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
     trainloader_iter = iter(trainloader)
     for step in trange(config.update_steps, desc="Training"):
         batch = next(trainloader_iter)
-        states, actions, returns, time_steps, mask = [
-            b.to(config.device) for b in batch
-        ]
+        states, actions, returns, time_steps, mask = [b.to(config.device) for b in batch]
         # True value indicates that the corresponding key value will be ignored
         padding_mask = ~mask.to(torch.bool)
 
@@ -511,18 +489,14 @@ def train(config: TrainConfig):
             time_steps=time_steps,
             padding_mask=padding_mask,
         )
-        loss = F.mse_loss(
-            predicted_actions, actions.detach(), reduction="none"
-        )
+        loss = F.mse_loss(predicted_actions, actions.detach(), reduction="none")
         # [batch_size, seq_len, action_dim] * [batch_size, seq_len, 1]
         loss = (loss * mask.unsqueeze(-1)).mean()
 
         optim.zero_grad()
         loss.backward()
         if config.clip_grad is not None:
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), config.clip_grad
-            )
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.clip_grad)
         optim.step()
         scheduler.step()
 
@@ -540,9 +514,7 @@ def train(config: TrainConfig):
             for target_return in config.target_returns:
                 eval_env.seed(config.eval_seed)
                 eval_returns = []
-                for _ in trange(
-                    config.eval_episodes, desc="Evaluation", leave=False
-                ):
+                for _ in trange(config.eval_episodes, desc="Evaluation", leave=False):
                     eval_return, eval_len = eval_rollout(
                         model=model,
                         env=eval_env,
@@ -557,12 +529,8 @@ def train(config: TrainConfig):
                 )
                 wandb.log(
                     {
-                        f"eval/{target_return}_return_mean": np.mean(
-                            eval_returns
-                        ),
-                        f"eval/{target_return}_return_std": np.std(
-                            eval_returns
-                        ),
+                        f"eval/{target_return}_return_mean": np.mean(eval_returns),
+                        f"eval/{target_return}_return_std": np.std(eval_returns),
                         f"eval/{target_return}_normalized_score_mean": np.mean(
                             normalized_scores
                         ),
