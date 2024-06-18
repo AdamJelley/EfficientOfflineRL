@@ -3,7 +3,6 @@ from pathlib import Path
 
 import imageio
 
-
 class VideoRecorder(object):
     def __init__(self, root_dir="./videos", height=256, width=256, fps=20):
         self.root_dir = Path(root_dir)

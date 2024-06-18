@@ -1,32 +1,30 @@
 # Inspired by:
 # 1. paper for SAC-N: https://arxiv.org/abs/2110.01548
 # 2. implementation: https://github.com/snu-mllab/EDAC
-from typing import Any, Dict, List, Optional, Tuple, Union
+import math
+import os
+import random
+import sys
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
-import math
-import os
 from pathlib import Path
-import random
-import sys
-import uuid
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import d4rl
+import d4rl  # noqa
 import gym
 import numpy as np
 import pandas as pd
 import pyrallis
 import torch
-from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal
 from tqdm import trange
 import wandb
 
 sys.path.append(str(Path(__file__).parent.parent.resolve()))
-from video_recorder import VideoRecorder
-
+from utils.video_recorder import VideoRecorder
 
 @dataclass
 class TrainConfig:
@@ -542,7 +540,7 @@ class EDAC:
         bc_regulariser: float = -1.0,
         soft_bc_regulariser: float = -1.0,
         td_component: float = -1.0,
-        device: str = "cpu",  # noqa
+        device: str = "cpu",
     ):
         self.device = device
 
@@ -1009,7 +1007,7 @@ def train(config: TrainConfig):
     )
 
     # Load checkpoint
-    if config.load_model != None:
+    if config.load_model is not None:
         policy_file = Path(config.load_model)
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
@@ -1036,24 +1034,24 @@ def train(config: TrainConfig):
                         ):
                             update_info = trainer.pretrain_BC(batch)
                         else:
-                            if buffer._soft_returns_loaded == False:
+                            if buffer._soft_returns_loaded is False:
                                 buffer.compute_soft_returns_to_go(
                                     alpha=trainer.alpha,
                                     actor=trainer.actor,
                                 )
                                 print("Soft returns to go loaded for BC actor!")
-                            assert buffer._soft_returns_loaded == True
+                            assert buffer._soft_returns_loaded is True
                             update_info = trainer.pretrain_soft_critic(
                                 batch, epoch, config.pretrain_epochs
                             )
                     elif config.pretrain == "softC":
-                        if buffer._soft_returns_loaded == False:
+                        if buffer._soft_returns_loaded is False:
                             buffer.compute_soft_returns_to_go(
                                 alpha=trainer.alpha,
                                 actor=trainer.actor,
                             )
                             print("Soft returns to go loaded for initialised actor!")
-                        assert buffer._soft_returns_loaded == True
+                        assert buffer._soft_returns_loaded is True
                         update_info = trainer.pretrain_soft_critic(
                             batch, epoch, config.pretrain_epochs
                         )

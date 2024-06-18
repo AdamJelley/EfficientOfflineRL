@@ -1,25 +1,24 @@
 # Inspired by:
 # 1. paper for SAC-N: https://arxiv.org/abs/2110.01548
 # 2. implementation: https://github.com/snu-mllab/EDAC
-from typing import Any, Dict, List, Optional, Tuple, Union
-from copy import deepcopy
-from dataclasses import asdict, dataclass
 import math
 import os
 import random
 import uuid
+from copy import deepcopy
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import d4rl
+import d4rl  # noqa
 import gym
 import numpy as np
 import pyrallis
 import torch
-from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal
 from tqdm import trange
 import wandb
-
 
 @dataclass
 class TrainConfig:
@@ -578,7 +577,7 @@ class MSG:
         eta: float = 1.0,
         beta: float = 0.0,
         alpha_learning_rate: float = 1e-4,
-        device: str = "cpu",  # noqa
+        device: str = "cpu",
     ):
         self.device = device
 
@@ -1156,26 +1155,26 @@ def train(config: TrainConfig):
                         if epoch < config.pretrain_epochs // 2:
                             update_info = trainer.pretrain_BC(batch)
                         else:
-                            if buffer._soft_returns_loaded == False:
+                            if buffer._soft_returns_loaded is False:
                                 buffer.compute_soft_returns_to_go(
                                     data=d4rl_dataset,
                                     alpha=trainer.alpha,
                                     actor=trainer.actor,
                                 )
                                 print("Soft returns to go loaded for BC actor!")
-                            assert buffer._soft_returns_loaded == True
+                            assert buffer._soft_returns_loaded is True
                             update_info = trainer.pretrain_soft_critic(
                                 batch, epoch, config.pretrain_epochs
                             )
                     elif config.pretrain == "softC":
-                        if buffer._soft_returns_loaded == False:
+                        if buffer._soft_returns_loaded is False:
                             buffer.compute_soft_returns_to_go(
                                 data=d4rl_dataset,
                                 alpha=trainer.alpha,
                                 actor=trainer.actor,
                             )
                             print("Soft returns to go loaded for initialised actor!")
-                        assert buffer._soft_returns_loaded == True
+                        assert buffer._soft_returns_loaded is True
                         update_info = trainer.pretrain_soft_critic(
                             batch, epoch, config.pretrain_epochs
                         )

@@ -1,20 +1,20 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
-from dataclasses import asdict, dataclass
-from datetime import datetime
 import os
-from pathlib import Path
 import random
 import uuid
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import d4rl
+import d4rl  # noqa
 import gym
 import numpy as np
 import pandas as pd
 import pyrallis
 import torch
-from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal
 import wandb
 
 TensorBatch = List[torch.Tensor]
@@ -327,7 +327,7 @@ class Actor(nn.Module):
         return self(state, deterministic=True)[0].cpu().data.numpy().flatten()
 
 
-class BC:  # noqa
+class BC:
     def __init__(
         self,
         max_action: np.ndarray,
@@ -480,7 +480,6 @@ def train(config: TrainConfig):
 
     wandb_init(asdict(config))
 
-    evaluations = []
     for t in range(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]

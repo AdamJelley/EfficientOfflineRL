@@ -1,11 +1,11 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
-from copy import deepcopy
-from dataclasses import asdict, dataclass
 import os
 import random
 import uuid
+from copy import deepcopy
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import d4rl
+import d4rl  # noqa
 import gym
 import numpy as np
 import pyrallis

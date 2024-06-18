@@ -1,24 +1,24 @@
 # source: https://github.com/young-geng/CQL/tree/934b0e8354ca431d6c083c4e3a29df88d4b0a24d
 # STRONG UNDER-PERFORMANCE ON PART OF ANTMAZE TASKS. BUT IN IQL PAPER IT WORKS SOMEHOW
 # https://arxiv.org/pdf/2006.04779.pdf
-from typing import Any, Dict, List, Optional, Tuple, Union
+import os
+import random
+import uuid
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
-import os
 from pathlib import Path
-import random
-import uuid
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import d4rl
+import d4rl  # noqa
 import gym
 import numpy as np
 import pandas as pd
 import pyrallis
 import torch
-from torch.distributions import Normal, TanhTransform, TransformedDistribution
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal, TanhTransform, TransformedDistribution
 import wandb
 
 TensorBatch = List[torch.Tensor]
@@ -846,14 +846,14 @@ class ContinuousCQL:
                 torch.exp(self.log_alpha_prime()), min=0.0, max=1000000.0
             )
             cql_min_qf1_loss = (
-                alpha_prime  # noqa
-                * self.cql_min_q_weight  # noqa
-                * (cql_qf1_diff - self.cql_target_action_gap)  # noqa
+                alpha_prime
+                * self.cql_min_q_weight
+                * (cql_qf1_diff - self.cql_target_action_gap)
             )
             cql_min_qf2_loss = (
-                alpha_prime  # noqa
-                * self.cql_min_q_weight  # noqa
-                * (cql_qf2_diff - self.cql_target_action_gap)  # noqa
+                alpha_prime
+                * self.cql_min_q_weight
+                * (cql_qf2_diff - self.cql_target_action_gap)
             )
 
             self.alpha_prime_optimizer.zero_grad()
@@ -1195,7 +1195,6 @@ def train(config: TrainConfig):
 
     wandb_init(asdict(config))
 
-    evaluations = []
     for t in range(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
@@ -1203,14 +1202,14 @@ def train(config: TrainConfig):
             if trainer.total_it < config.AC_pretrain_steps // 2:
                 log_dict = trainer.pretrain_BC(batch)
             else:
-                if replay_buffer._soft_returns_loaded == False:
+                if replay_buffer._soft_returns_loaded is False:
                     replay_buffer.compute_soft_returns_to_go(
                         data=dataset,
                         alpha=trainer.alpha,
                         actor=trainer.actor,
                     )
                     print("Soft returns to go loaded for BC actor!")
-                assert replay_buffer._soft_returns_loaded == True
+                assert replay_buffer._soft_returns_loaded is True
                 log_dict = trainer.pretrain_softC(batch)
         else:
             log_dict = trainer.train(batch)

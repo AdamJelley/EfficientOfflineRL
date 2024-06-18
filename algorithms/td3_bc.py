@@ -1,16 +1,16 @@
 # source: https://github.com/sfujim/TD3_BC
 # https://arxiv.org/pdf/2106.06860.pdf
-from typing import Any, Dict, List, Optional, Tuple, Union
 import copy
-from dataclasses import asdict, dataclass
-from datetime import datetime
 import os
-from pathlib import Path
 import random
 import sys
 import uuid
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import d4rl
+import d4rl  # noqa
 import gym
 import numpy as np
 import pandas as pd
@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import wandb
 
 sys.path.append(str(Path(__file__).parent.parent.resolve()))
-from video_recorder import VideoRecorder
+from utils.video_recorder import VideoRecorder
 
 TensorBatch = List[torch.Tensor]
 
@@ -384,7 +384,7 @@ class Critic(nn.Module):
         return self.net(sa)
 
 
-class TD3_BC:  # noqa
+class TD3_BC:
     def __init__(
         self,
         max_action: float,
@@ -652,6 +652,7 @@ class TD3_BC:  # noqa
 
 @pyrallis.wrap()
 def train(config: TrainConfig):
+    print(config.env)
     env = gym.make(config.env)
 
     state_dim = env.observation_space.shape[0]
@@ -749,7 +750,6 @@ def train(config: TrainConfig):
 
     wandb_init(asdict(config))
 
-    evaluations = []
     for t in range(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
