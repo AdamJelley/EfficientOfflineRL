@@ -24,14 +24,27 @@ Please note also that [ReBRAC](https://arxiv.org/abs/2305.09836) (developed conc
 
 ## Installation
 
+Linux installation with [miniconda](https://docs.anaconda.com/miniconda/):
 ```bash
 git clone git@github.com:AdamJelley/EfficientOfflineRL.git && cd EfficientOfflineRL
 conda create -y -n EORL python=3.10
 conda activate EORL
-conda install -y -c conda-forge glew=2.1.0 glfw=3.3.10
-pip install -r requirements.txt
+conda install -y -c conda-forge glew=2.1.0
+pip install -r requirements/requirements.txt
 ```
-Alternatively, you could use docker using the provided Dockerfile:
+The [MuJoCo](https://github.com/google-deepmind/mujoco) binaries must also be installed to the default location in the home directory. If you have not already installed these binaries, this can be done as follows:
+```bash
+wget https://mujoco.org/download/mujoco210-linux-x86_64.tar.gz -O mujoco.tar.gz
+mkdir ~/.mujoco
+tar -xf mujoco.tar.gz -C ~/.mujoco
+rm mujoco.tar.gz
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
+```
+Note that the final two lines should be added to your `.bashrc` for future use.
+
+
+Alternatively to all of the above, you could use [docker](https://docs.docker.com/get-docker/) using the provided [Dockerfile](./Dockerfile):
 ```bash
 docker build -t <image_name> .
 docker run gpus=all -it --rm --name <container_name> <image_name>
@@ -55,7 +68,7 @@ Note these assume access to a CUDA device to run (otherwise set `--device cpu`).
 
 Other environments can be run by changing the config. Hyperparameters can be changed either in the relevant config or overridden with arguments as above.
 
-The pre-training argument can also be set to `--pretrain BC` to only pretrain the actor (corresponding to the ablation in Appendix D of the paper), or ignored to run the default algorithm without pre-training. LayerNorm can also be removed from the actor or critic with `--actor_LN False` and `--critic_LN False` respectively. For `pretrain_steps`, `td_component` (referred to as $\lambda$ in the paper) and other hyperparameters used please see the paper.
+The pre-training argument can also be set to `--pretrain BC` to only pretrain the actor (corresponding to the ablation in Appendix D of the paper), or ignored to run the default algorithm without pre-training. LayerNorm can also be removed from the actor or critic with `--actor_LN False` and `--critic_LN False` respectively. For `pretrain_steps`, `td_component` (referred to as $\lambda$ in the paper) and other hyperparameters used please see the paper. Videos of the agent during final evaluation can be recorded using `--render True`.
 
 ## Adroit Environments (Section 6 of Paper)
 
