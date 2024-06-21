@@ -4,7 +4,7 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Imports: isort](https://img.shields.io/badge/%20imports-isort-%231674b1?style=flat&labelColor=ef8336)](https://pycqa.github.io/isort/)
 
-This repository contains the codebase for the paper: Efficient Offline Reinforcement Learning: The Critic is Critical. This paper investigates improving the efficiency and stability of offline off-policy reinforcement learning algorithms (such as TD3+BC and EDAC) through supervised pre-training of both the actor and the critic to match the behavior policy.
+This repository contains the codebase for the paper: [Efficient Offline Reinforcement Learning: The Critic is Critical](https://arxiv.org/abs/2406.13376). This paper investigates improving the efficiency and stability of offline off-policy reinforcement learning algorithms (such as TD3+BC and EDAC) through supervised pre-training of both the actor and the critic to match the behavior policy.
 
 ![MotivationalExample](assets/GitHubFigure.png)
 
@@ -93,6 +93,14 @@ Note that performance on these environments is very high variance due to the lim
 If you would like to cite our work on improving the efficiency and stability of offline off-policy algorithms, please use the following bibtex:
 
 ```bibtex
+@misc{jelley2024efficient,
+      title={Efficient Offline Reinforcement Learning: The Critic is Critical},
+      author={Adam Jelley and Trevor McInroe and Sam Devlin and Amos Storkey},
+      year={2024},
+      eprint={2406.13376},
+      archivePrefix={arXiv},
+      primaryClass={id='cs.LG'}
+}
 ```
 
 Otherwise, if you are interested in citing the CORL codebase, please use:
